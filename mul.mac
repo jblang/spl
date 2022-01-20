@@ -1,0 +1,56 @@
+	.Z80
+
+	ENTRY		.MUL
+
+;	TITLE	"SMTH11 - Syslib 4.3a"
+
+;=================================================================
+;   The Libraries, Version 4, (C) 1989 by Alpha Systems Corp.
+;-----------------------------------------------------------------
+; Author  : Joe Wright
+; Date    : 9 Dec 89
+; Version : 1.5
+; Module  : SMTH11
+; Abstract: This module contains the routine .MUL which multiplies
+;	two unsigned 16-bit values and returns the result.
+; Revision:
+;  1.5 - 03 Apr 04 - renamed to .MUL and save one byte by
+;	A = 0 convention in SPL, P. Schorn
+;  1.4 - 26 Oct 90 - Add .MUL entry.  Shortened and sped up
+;	multiply routine.				JWW
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+;===============================================================
+; NAME - .MUL	General Purpose Sixteen Bit Multiplication
+; Entry: HL, DE - Two 16-bit unsigned values to multiply
+;	A = 0 (SPL convention)
+; Exit : DE, HL - The 32-bit Product of the multiplication
+; Uses : HL, DE, BC
+;	A = 0 at exit
+;===============================================================
+
+.MUL:	LD	B,H
+	LD	C,L		; Multiplicand to BC
+	LD	L,A		; Zero an accumulator
+	LD	H,A
+	LD	A,16		; Loop counter
+
+; Main loop.  We do this sixteen times.
+
+MLHD:	ADD	HL,HL		; Shift Accumulator left into Cy	 11
+	EX	DE,HL		; Multiplier to HL			  4
+	ADC	HL,HL		; MSB to Carry				 15
+	EX	DE,HL		; Put it back				  4
+
+	JR	NC,MLHD1	; MSB was Zero, else..			~10
+	ADD	HL,BC		; Add multiplicand to accumulator	 ~5
+
+MLHD1:	DEC	A		; Decrement the count			  4
+	JR	NZ,MLHD		; Finished?				 12
+
+				;				 Sub	 63
+				;			    16 * Sub = 1010
+	RET			; Product in DE, HL
+
+	END
+

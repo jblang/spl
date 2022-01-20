@@ -1,0 +1,25 @@
+	.Z80
+
+	ENTRY	.R0X, .R0V
+
+;	return from a procedure which has more than 255 bytes of local variables
+;	but no local parameters
+;	<DE> = sizeLocalVariables
+;	<HL> is unchanged as it may contain a function result
+.R0X:	EX	DE,HL		; save <HL> into <DE>, <HL> = sizeLocalVariables
+	JR	CRET
+
+;	return from a procedure which has at most 255 bytes of local variables
+;	but no local parameters
+;	<E> = sizeLocalVariables
+;	<HL> is unchanged as it may contain a function result
+.R0V:	EX	DE,HL		; save <HL> into <DE>, <L> = sizeLocalVariables
+	LD	H,A		; <HL> = sizeLocalVariables
+CRET:	ADD	HL,SP		; compute new <SP>
+	LD	SP,HL		; and load it
+	POP	IX		; restore frame pointer
+	EX	DE,HL		; restore <HL>
+	RET
+
+	END
+

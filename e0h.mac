@@ -1,0 +1,15 @@
+	.Z80
+
+	ENTRY	.E0H
+
+; set carry flag if <HL> not equal 0
+.E0H:	XOR	A		; clear carry flag
+	LD	A,H		; upper byte
+	OR	L		; lower byte
+	RET	Z		; return if equal 0, carry is not set
+	XOR	A		; re-establish invariant
+	SCF			; <HL> <> 0, set carry flag
+	RET
+
+	END
+

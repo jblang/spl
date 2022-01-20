@@ -1,0 +1,159 @@
+PROGRAM MakeSPLERRORDAT;
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+
+CONST	{ File Control Block related constants }
+	defaultFCBAddress	= 05Ch;
+	commandLineAddress	= 80h;
+	FCBLength		= 36; { allow random access }
+	recordSize		= 128;
+
+	{ Character constants }
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	eof			= 1ah;
+	terminator		= '$';
+
+	{ Error codes }
+	noError			= 0;
+	leastOKCode		= 3;
+	notFoundError		= 0ffh;
+	noDirectorySpaceError	= 0ffh;
+
+	{ BDOS functions }
+	printStringCmd		= 09h;
+	closeFileCmd		= 10h;
+	openFileCmd		= 0fh;
+	deleteFileCmd		= 13h;
+	readSequentialCmd	= 14h;
+	writeSequentialCmd	= 15h;
+	makeFileCmd		= 16h;
+	setDMAAdressCmd		= 1ah;
+
+	{ Program related constants }
+	errorMessageLength	= 64;	{ maximal length of an error message }
+	totalErrorMessages	= 100;	{ total number of error messages     }
+
+BYTE 	commandLine	AT commandLineAddress;
+	usage		= ('usage: CERR filename', crlf, '$':[1]);
+	signon		= (crlf, 'CERR V-1.05 (16-Jul-2004)');
+	crlfString	= (crlf, '$':[1], eof:[1]);
+	fileNotFound	= ('Input file not found.', crlf, '$':[1]);
+	fileSystemFull	= ('File system full.', crlf, '$':[1]);
+	errorWriting	= ('Error writing file.', crlf, '$':[1]);
+	errorClosing	= ('Error closing file.', crlf, '$':[1]);
+	warningString	= ('Warning: Error message ');
+	ch1		= 'X':[1];
+	ch2		= 'X':[1];
+	fin		= '$':[1];
+	tooLong		= (' truncated to 63 characters.', crlf, '$':[1]);
+	duplicate	= (' already defined.', crlf, '$':[1]);
+
+BYTE[FCBLength]	defaultFCB AT defaultFCBAddress;
+BYTE[FCBLength]	errorFileFCB = (0:[1], 'SPLERRORDAT',
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+BYTE[recordSize] inputRecord;
+
+WORD	heap,	{ pointer to first unused byte on the heap	}
+	pos,	{ position in inputRecord for next character	}
+	ch,	{ current character				}
+	i,	{ counters					}
+	j, n;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE getCharacter;
+	BEGIN
+	IF	pos >>= recordSize
+	THEN	pos := 0;
+		BDOS(setDMAAdressCmd, @inputRecord);
+		IF	BDOS(readSequentialCmd, @defaultFCB) <> noError
+		THEN	inputRecord[0] := eof
+		ENDIF
+	ENDIF;
+	ch := inputRecord[pos]:[1];
+	pos := pos + 1
+	END getCharacter;
+
+BEGIN { MakeSPLERRORDAT }
+printString(@signon);
+IF	commandLine[0]:[1] = 0
+THEN	printString(@usage);
+	EXIT
+ENDIF;
+
+IF	BDOS(openFileCmd, @defaultFCB) = notFoundError
+THEN	printString(@fileNotFound);
+	EXIT
+ENDIF;
+pos := recordSize;
+
+heap := LAST;
+i := heap;
+j := errorMessageLength * totalErrorMessages;
+WHILE j DO
+	i^:[1] := terminator;
+	i := i + 1;
+	j := j - 1
+ENDWHILE;
+
+LOOP
+	getCharacter;
+	ch1 := ch;		{ prepare warning message, first character  }
+	n := 10 * (ch - '0');
+	getCharacter;
+	ch2 := ch;		{ prepare warning message, second character }
+	n := n + ch - '0';	{ n is now number of warning message	    }
+	IF	NOT n
+	THEN	EXIT		{ we are done when n = 0		    }
+	ENDIF;
+	i := heap + errorMessageLength * (n - 1);
+	j := 0;
+	IF	i^:[1] <> terminator
+	THEN	printString(@warningString);
+		printString(@duplicate)
+	ENDIF;
+	LOOP
+		getCharacter;
+		IF	ch = cr
+		THEN	getCharacter;
+			EXIT
+		ENDIF;
+		j := j + 1;
+		IF	j <<= (errorMessageLength - 1)
+		THEN	i^:[1] := ch;
+			i := i + 1
+		ELSIF	j = errorMessageLength
+		THEN	printString(@warningString);
+			printString(@tooLong)
+		ENDIF
+	ENDLOOP
+ENDLOOP;
+
+BDOS(deleteFileCmd, @errorFileFCB);
+IF	BDOS(makeFileCmd, @errorFileFCB) = noDirectorySpaceError
+THEN	printString(@fileSystemFull);
+	EXIT
+ENDIF;
+
+i := heap;
+j := totalErrorMessages DIV 2;
+WHILE j DO
+	BDOS(setDMAAdressCmd, i);
+	IF	BDOS(writeSequentialCmd, @errorFileFCB) <> noError
+	THEN	printString(@errorWriting)
+	ENDIF;
+	i := i + recordSize;
+	j := j - 1
+ENDWHILE;
+IF	BDOS(closeFileCmd, @errorFileFCB) >> leastOKCode
+THEN	printString(@errorClosing)
+ENDIF
+
+END MakeSPLERRORDAT.
+

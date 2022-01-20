@@ -1,0 +1,195 @@
+PROGRAM Increment;
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE INPORT(WORD port);		EXTERNAL;
+PROCEDURE OUTPOR(WORD port, data);	EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+{
+	(.*)'nn.nn (03-Dec-06 12:55:23)' ->
+	\1'nn.nn+1 new date new time'
+}
+
+CONST	FCBLength		= 36; { allow random access }
+	zeroStart		= 12; { keep zeroStart chars, clear rest }
+	recordSize		= 128;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256*lf;
+	eof			= 1ah;
+	defaultFCBAddress	= 5ch;
+	commandLineAddress	= 80h;
+	simhport		= 0feh;
+	getClockZSDOSCmd	= 7;
+
+	noError			= 0;
+	leastOKCode		= 3;
+	notFoundError		= 0ffh;
+	noDirectorySpaceError	= 0ffh;
+
+	{ BDOS functions }
+	printCharCmd		= 02h;
+	printStringCmd		= 09h;
+	closeFileCmd		= 10h;
+	openFileCmd		= 0fh;
+	deleteFileCmd		= 13h;
+	readSequentialCmd	= 14h;
+	writeSequentialCmd	= 15h;
+	makeFileCmd		= 16h;
+	setDMAAdressCmd		= 1ah;
+
+	yearOffset		= 0; { index for clock structure }
+	monthOffset		= 1;
+	dayOffset		= 2;
+	hourOffset		= 3;
+	minuteOffset		= 4;
+	secondOffset		= 5;
+	
+BYTE[FCBLength]	inFileFCB AT defaultFCBAddress;
+BYTE	numberOfCharacters AT commandLineAddress;
+	logon			= (cr:[1], 'INC V2.00 (03-Dec-06)');
+	crlfString		= (crlf, '$':[1], eof:[1]);
+	usage			= ('Usage: INC FileName',   crlf, '$':[1]);
+	fileNotFound		= ('Input file not found.', crlf, '$':[1]);
+	fileSystemFull		= ('File system full.',	    crlf, '$':[1]);
+	errorReading		= ('Error reading file.',   crlf, '$':[1]);
+	errorWriting		= ('Error writing file.',   crlf, '$':[1]);
+	errorClosing		= ('Error closing file.',   crlf, '$':[1]);
+	illegalFile		= ('Syntax error in file.', crlf, '$':[1]);
+	months			= ('JanFebMarAprMayJunJulAugSepOctNovDec');
+
+WORD	heap, pos, posDate, i, bufferEnd;
+BYTE[6]	clock; { year, month, day, hour, minute, second: two digit BCD each }
+	
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printBuffer;
+	BEGIN
+	i := heap;
+	WHILE i^:[1] <> eof DO
+		BDOS(printCharCmd, i^:[1]);
+		i := i + 1
+	ENDWHILE;
+	printString(@crlfString)
+	END printBuffer;
+
+PROCEDURE search(WORD char);
+	BEGIN
+	WHILE pos^:[1] <> char:[1] DO
+		pos := pos + 1
+	ENDWHILE
+	END search;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	pos^:[1] := char:[1];
+	pos := pos + 1
+	END printChar;
+
+PROCEDURE printTwoDigits(WORD n); { n is two digit BCD number }
+	BEGIN
+	printChar('0' + n DIV 16);
+	printChar('0' + n MOD 16)
+	END printTwoDigits;
+
+PROCEDURE fatalError(WORD stringp);
+	BEGIN
+	printString(stringp);
+	STPSUB;
+	HALT
+	END fatalError;
+
+BEGIN { Increment }
+
+printString(@logon);
+
+IF	numberOfCharacters = 0
+THEN	fatalError(@usage)
+ENDIF;
+
+heap := LAST;
+bufferEnd := heap + recordSize;
+bufferEnd^:[2] := "'" + 256 * " ";
+(bufferEnd + 2)^:[1] := eof;
+
+IF	BDOS(openFileCmd, @inFileFCB) = notFoundError
+THEN	fatalError(@fileNotFound)
+ENDIF;
+BDOS(setDMAAdressCmd, heap);
+IF	BDOS(readSequentialCmd, @inFileFCB) <> noError
+THEN	fatalError(@errorReading)
+ENDIF;
+
+pos := heap;
+search("'");
+search(" ");
+posDate := pos;
+pos := pos - 1;
+IF	(pos^:[1] << '0') OR (pos^:[1] >> '9')
+THEN	fatalError(@illegalFile)
+ENDIF;
+printBuffer;
+
+LOOP
+	IF	pos << heap
+	THEN	EXIT
+	ENDIF;
+	IF	pos^:[1] = '9'
+	THEN	pos^:[1] := '0'
+	ELSIF	('0' <<= pos^:[1]) AND (pos^:[1] <<= '8')
+	THEN	pos^:[1] := pos^:[1] + 1;
+		EXIT
+	ENDIF;
+	pos := pos - 1
+ENDLOOP;
+
+pos := @clock;
+OUTPOR(simhport, getClockZSDOSCmd);
+WHILE pos << @clock + 6 DO
+	pos^:[1] := INPORT(simhport);
+	pos := pos + 1
+ENDWHILE;
+
+pos := posDate + 1;
+printChar('(');
+printTwoDigits(clock[dayOffset]:[1]);
+printChar('-');
+i := 3 * (10 * ((clock[monthOffset]:[1] DIV 16) AND 0FH) + 
+	clock[monthOffset]:[1] AND 0FH - 1);
+printChar(months[i    ]:[1]);
+printChar(months[i + 1]:[1]);
+printChar(months[i + 2]:[1]);
+printChar('-');
+printTwoDigits(clock[yearOffset]:[1]);
+printChar(' ');
+printTwoDigits(clock[hourOffset]:[1]);
+printChar(':');
+printTwoDigits(clock[minuteOffset]:[1]);
+printChar(':');
+printTwoDigits(clock[secondOffset]:[1]);
+printChar(')');
+printChar("'");
+WHILE pos << bufferEnd DO
+	printChar(eof)
+ENDWHILE;
+printBuffer;
+
+inFileFCB[zeroStart]:[FCBLength - zeroStart] := 0;
+ 
+BDOS(deleteFileCmd, @inFileFCB);
+IF	BDOS(makeFileCmd, @inFileFCB) = noDirectorySpaceError
+THEN	fatalError(@fileSystemFull)
+ENDIF;
+IF	BDOS(writeSequentialCmd, @inFileFCB) <> noError
+THEN	fatalError(@errorWriting)
+ENDIF;
+IF	BDOS(closeFileCmd, @inFileFCB) >> leastOKCode
+THEN	fatalError(@errorClosing)
+ENDIF
+
+END Increment.
+

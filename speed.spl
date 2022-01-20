@@ -1,0 +1,124 @@
+PROGRAM Speed;
+
+{	Version history
+	- 12-Feb-2007, P. Schorn, moved time measurement out of loop
+	- 03-Jul-2004, P. Schorn, user can set number of t-states to execute
+	- 30-Jun-2004, P. Schorn, updated standard procedures
+	- 26-Feb-2003, P. Schorn, DELAY instead of SLEEP
+	- 25-Feb-2003, P. Schorn, initial version
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE DELAY(WORD x);		EXTERNAL;
+PROCEDURE INPORT(WORD port);		EXTERNAL;
+PROCEDURE OUTPOR(WORD port, data);	EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	printCharCmd		= 2h;
+	printStringCmd		= 9h;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	eof			= 1ah;
+	defaultExperiments	= 100;
+	commandLineAddress	= 80h;
+	SIMHPort		= 0feh;
+	SIMHGetVersionCmd	= 6;
+	SIMHResetStopWatchCmd	= 25;
+	SIMHReadStopWatchCmd	= 26;
+
+BYTE	signon1		= (crlf,'SPEED V-1.03 (12-Feb-2007)', crlf, lf:[1], 'Executing $');
+	signon2		= (" * 10'000'000 t-states - Please wait ... $");
+	res1		= (crlf, lf:[1],	' Time needed in milliseconds = $');
+	res2		= (crlf, 		'Average time in milliseconds = $');
+	res3		= (crlf,		'  CPU clock frequency in MHz = $');
+	res4		= (crlf, '$':[1], eof:[1]);
+	commandLineLength	AT commandLineAddress;
+
+WORD	cpmResult, totalMillis, count, experiments;
+
+PROCEDURE CPM2(WORD function, input);
+	BEGIN
+	cpmResult := BDOS(function:[1], input)
+	END CPM2;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	CPM2(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	CPM2(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printUnsignedInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printUnsignedInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printUnsignedInt;
+
+PROCEDURE inport;
+	BEGIN
+	RETURN INPORT(SIMHPort)
+	END inport;
+
+PROCEDURE checkForSIMH;
+	STATIC BYTE[4] buffer;
+	STATIC BYTE simhrequired = ('SIMH required.', crlf, '$':[1]);
+	BEGIN
+	OUTPOR(SIMHPort, SIMHGetVersionCmd);
+	buffer[0]:[1] := inport;
+	buffer[1]:[1] := inport;
+	buffer[2]:[1] := inport;
+	buffer[3]:[1] := inport;
+	IF	buffer = simhrequired:[4]
+	THEN	REPEAT
+		UNTIL	inport = 0
+	ELSE	printString(@simhrequired);
+		STPSUB;
+		HALT				{ make sure we are running under SIMH	}
+	ENDIF
+	END checkForSIMH;
+
+BEGIN
+printString(@signon1);
+IF	commandLineLength = 0
+THEN	experiments := defaultExperiments
+ELSE	count := commandLineAddress + 2;	{ pointer to first non-blank character in buffer }
+	experiments := 0;
+	WHILE ('0' <<= count^:[1]) AND (count^:[1] <<= '9') DO
+		experiments := 10 * experiments + count^:[1] - '0';
+		count := count + 1
+	ENDWHILE
+ENDIF;
+printUnsignedInt(experiments);
+printString(@signon2);
+IF	experiments = 0
+THEN	EXIT
+ENDIF;
+checkForSIMH;
+count := experiments;
+OUTPOR(SIMHPort, SIMHResetStopWatchCmd);
+REPEAT
+	count := count - 1;
+	DELAY(10000)
+UNTIL count = 0;
+OUTPOR(SIMHPort, SIMHReadStopWatchCmd);
+totalMillis := inport + 256 * inport;
+
+printString(@res1);
+printUnsignedInt(totalMillis);
+printString(@res2);
+count := totalMillis DIV experiments;
+printUnsignedInt(count);
+printString(@res3);
+printUnsignedInt(10000 DIV count);
+printString(@res4)
+
+END Speed.
+

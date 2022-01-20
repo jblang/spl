@@ -1,0 +1,75 @@
+	.Z80
+
+	ENTRY	.STA, .LAST, .FIN, CPUTYP, STPSUB, HALT
+
+BDOS		EQU	0005H
+SIMHPORT	EQU	0FEH
+SET8080CPU	EQU	20
+SETZ80CPU	EQU	19
+CR		EQU	13
+LF		EQU	10
+PRINTST		EQU	9
+DELETE		EQU	13H
+
+; make sure that this module is the last in the library as it defines .LAST
+
+FCB:	DB	1,'$$$     SUB',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+; PROCEDURE STPSUB;EXTERNAL;
+; Cancels a potential batch jobs, part of SPL run-time, only for Z80
+STPSUB:	PUSH	IX		; save <IX> as BIOS might change it
+	CALL	STPSUI		; call internal version
+	POP	IX		; restore <IX>
+	XOR	A		; establish invariant
+	RET
+
+; set <SP> to highest possible value
+I8080:	LD	C,PRINTST	; prepare for print
+	LD	DE,Z80REQ	; inform user that we need to terminate
+	CALL	BDOS		; print the message
+; internal version of STPSUB which might change <IX>, also works on 8080
+STPSUI:	LD	DE,FCB		; File Control Block for $$$.SUB
+	LD	C,DELETE	; BDOS command for file deletion
+	JP	BDOS		; delete it and return to CP/M
+
+.STA:	LD	HL,CPUTYP	; adddress of CPU type indicator byte
+	XOR	A		; check for 8080
+	LD	(HL),A		; default is 8080, CPUTYP = 0
+	DEC	A		; now 8 times bit 1 set
+	JP	PE,IS8080	; parity even indicates 8080 CPU
+	INC	(HL)		; this is a Z80 CPU, CPUTYP = 1
+	JR	DONE		; therefore can also use the relative jump
+
+IS8080:	LD	A,SETZ80CPU	; prepare to set to Z80 (works only on SIMH)
+	OUT	(SIMHPORT),A	; send command
+	XOR	A		; <A>:=0, double check that we got a Z80 by now
+	DEC	A		; now 8 times bit 1 set
+	JP	PE,I8080	; parity even indicates still an 8080 CPU, stop
+DONE:	LD	HL,(BDOS+1)	; <HL> := first used address
+	LD	DE,-7		; below are 6 bytes of serial numer
+	ADD	HL,DE		; <HL> := first free address
+	POP	DE		; <DE> := return address
+	LD	SP,HL		; set new stack pointer
+	EX	DE,HL		; <HL> := return address
+	XOR	A		; <A> = 0 is invariant
+	JP	(HL)		; proceed
+
+HALT:
+.FIN:	LD	A,(CPUTYP)	; get CPU type indicator
+	OR	A		; is it an Z80
+	JR	NZ,DOREBT	; yes, just reboot
+	LD	A,SET8080CPU	; prepare to set to 8080
+	OUT	(SIMHPORT),A	; send command
+DOREBT:	RST	0		; reboot
+
+CPUTYP:	DB	0		; 0 if CPU is 8080, 1 if CPU is Z80
+
+.LAST:	DB	'SPLRTLB V-1.'
+
+INCLUDE	SPLRTLB.DAT
+
+	DB	0
+Z80REQ:	DB	'Z80 processor required.',CR,LF,'$'
+
+	END
+

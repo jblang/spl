@@ -1,0 +1,388 @@
+PROGRAM relDump;
+
+{	Version history
+	- 22-Mar-2015, P. Schorn, compatibility with new SPL compiler
+	- 26-Dec-2012, P. Schorn, fixed lf constant (found by Volker Pohlers) and
+					command line input
+	- 15-Aug-2004, P. Schorn, added some optimizations
+
+	Shows the contents of a .REL file
+}
+
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	recordSize			= 128;
+	printCharCmd			= 02h;
+	directConsoleIOCmd		= 06h;
+	printStringCmd			= 09h;
+	readConsoleStringCmd		= 0Ah;
+	openFileCmd			= 0fh;
+	closeFileCmd			= 10h;
+	readSequentialCmd		= 14h;
+	setDMAAdressCmd			= 1ah;
+	fileSize			= 42;
+	charPointerOffset		= 0;
+	errorStatusOffset		= 2;
+	bufferStartOffset		= 4;
+	driveOffset			= 6;
+	leastOKCode			= 3;
+	cr				= 13;
+	lf				= 10;
+	crlf				= cr + 256 * lf;
+	eof				= 1ah;
+	ctrlC				= 3;
+	esc				= 27;
+	noError				= 0;
+	errorDetected			= 00ffh;
+	false				= 0;
+	true				= 1;
+	absNum				= 16;
+	defaultFirstLoadingAddress	= 0103h;
+	firstCharAddress		= 81H;
+
+BYTE[fileSize]
+	input;
+BYTE	numberOfCharacters AT firstCharAddress - 1;
+BYTE[5]	extension	= ('.REL', 0:[1]);
+BYTE	logon		= (crlf, cr:[1], 'RELDUMP V1.24 (26-Dec-12)', crlf, '$':[1], eof:[1]);
+	fileDoesNotExistString = ('File not found.', crlf, '$':[1]);
+	unexpectedEndString = (crlf, 'Unexpected end of input file.'); { followed by crlfString }
+	crlfString	= (crlf, '$':[1]);
+	abortedString	= (crlf, 'Aborted.', crlf,	'$':[1]);
+	prompt		= (crlf, 'Input filename: ',	'$':[1]);
+	absolute	= ('absolute ',			'$':[1]);
+	programText = ('program',			'$':[1]);
+	data		= ('data',			'$':[1]);
+	common		= ('common',			'$':[1]);
+	relative	= (' relative ',		'$':[1]);
+	t0		= ('Entry symbol',		'$':[1]);
+	t1		= ('COMMON block',		'$':[1]);
+	t2		= ('Program name',		'$':[1]);
+	t3		= ('Library search',		'$':[1]);
+	t4		= ('4 reserved',		'$':[1]);
+	t5		= ('COMMON size',		'$':[1]);
+	t6		= ('Chain external',		'$':[1]);
+	t7		= ('Entry point',		'$':[1]);
+	t8		= ('8 reserved',		'$':[1]);
+	t9		= ('External + offset',		'$':[1]);
+	t10		= ('Size of Data',		'$':[1]);
+	t11		= ('Set location counter',	'$':[1]);
+	t12		= ('Chain address',		'$':[1]);
+	t13		= ('Program size',		'$':[1]);
+	t14		= ('End program',		'$':[1]);
+	t15		= ('End file',			'$':[1]);
+BYTE[32]
+	fileName;
+WORD[16]
+	types		=	(@t0, @t1, @t2, @t3, @t4, @t5, @t6, @t7,
+				 @t8, @t9, @t10, @t11, @t12, @t13, @t14, @t15);
+WORD[4]	pdc		=	(@absolute, @programText, @data, @common);
+WORD	Bit, BitMask, theByte, BitStream, counter, finis, absByte, absCount, ch;
+	heap, programCounter, showProgramCounter, relByteCounter, lastP;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printLn;
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE outByte(WORD theByte);
+	STATIC BYTE hexDigits = ('0123456789ABCDEF');
+	BEGIN
+	printChar(hexDigits[theByte:[1] DIV 16]:[1]);
+	printChar(hexDigits[theByte:[1] AND 15]:[1])
+	END outByte;
+
+PROCEDURE inputCapString(WORD stringP);
+	STATIC WORD	ch;
+	BEGIN
+	IF	numberOfCharacters = 0
+	THEN	(firstCharAddress - 2)^:[1] := 32; { capacity of buffer }
+		BDOS(readConsoleStringCmd, firstCharAddress - 2);
+		printLn;
+	ENDIF;
+	(firstCharAddress + numberOfCharacters)^:[1] := 0; { add terminating zero } 
+	lastP := firstCharAddress;
+	WHILE lastP^:[1] = ' ' DO
+		lastP := lastP + 1
+	ENDWHILE;
+	REPEAT
+		ch := lastP^:[1];
+		IF	('a' <<= ch) AND (ch <<= 'z')
+		THEN	ch := ch + ('A' - 'a')
+		ENDIF;
+		lastP := lastP + 1;
+		stringP^:[1] := ch;
+		stringP := stringP + 1
+	UNTIL ch = 0
+	END inputCapString;
+
+PROCEDURE openread(WORD fileNameP, bufferStart, fileP);
+{	layout of extended file control block is
+	WORD	charPointer
+	WORD	errorStatus
+	WORD	bufferStart
+	regular CP/M FCB
+}
+	STATIC WORD i, j, filePStatic, fileNamePStatic, ch;
+	BEGIN
+	filePStatic := fileP;
+	fileNamePStatic := fileNameP;
+	i := filePStatic;
+	j := fileSize;
+	WHILE j DO
+		j := j - 1;
+		i^:[1] := 0;
+		i := i + 1
+	ENDWHILE;
+	(filePStatic + charPointerOffset)^:[2] := bufferStart + recordSize;
+	(filePStatic + bufferStartOffset)^:[2] := bufferStart;
+
+	IF	(fileNamePStatic + 1)^:[1] = ':'
+	THEN	i := fileNamePStatic + 2;
+		(filePStatic + driveOffset)^:[1] := fileNamePStatic^:[1] + (1 - 'A')
+	ELSE	i := fileNamePStatic
+	ENDIF;
+
+	j := filePStatic + (driveOffset + 1);
+	WHILE j <<= filePStatic + (driveOffset + 11) DO
+		ch := i^:[1];
+		IF	ch = 0
+		THEN	j^:[1] := ' ';
+			j := j + 1
+		ELSIF	ch = '.'
+		THEN	IF	j <<= filePStatic + (driveOffset + 8)
+			THEN	j^:[1] := ' ';
+				j := j + 1
+			ELSE	i := i + 1
+			ENDIF
+		ELSE	j^:[1] := ch;
+			i := i + 1;
+			j := j + 1
+		ENDIF
+	ENDWHILE;
+
+	IF	BDOS(openFileCmd, filePStatic + driveOffset) >>= leastOKCode + 1
+	THEN	(filePStatic + errorStatusOffset)^:[2] := errorDetected
+	ENDIF
+	END openread;
+
+PROCEDURE readch(WORD charP, fileP);
+	STATIC WORD filePStatic, bufferStart, bufferP;
+	STATIC BYTE i;
+	BEGIN
+	filePStatic := fileP;
+	bufferStart := (filePStatic + bufferStartOffset)^:[2];
+	bufferP := (filePStatic + charPointerOffset)^:[2];
+	IF	bufferP >>= bufferStart + recordSize
+	THEN	bufferP := bufferStart;
+		BDOS(setDMAAdressCmd, bufferStart);
+		IF	BDOS(readSequentialCmd, filePStatic + driveOffset) = noError
+		THEN	(filePStatic + errorStatusOffset)^:[2] := 0
+		ELSE	(filePStatic + errorStatusOffset)^:[2] := errorDetected;
+			i := recordSize;
+			WHILE i DO
+				bufferStart^:[1] := eof;
+				bufferStart := bufferStart + 1;
+				i := i - 1
+			ENDWHILE
+		ENDIF
+	ENDIF;
+	charP^:[1] := bufferP^:[1];
+	(filePStatic + charPointerOffset)^:[2] := bufferP + 1
+	END readch;
+
+PROCEDURE getBit;
+	BEGIN
+	IF	BitMask = 0
+	THEN	BitMask := 128;
+		readch(@theByte, @input);
+		relByteCounter := relByteCounter + 1;
+		IF	input[errorStatusOffset]:[2] = errorDetected
+		THEN	printString(@unexpectedEndString);
+			HALT
+		ENDIF;
+	ENDIF;
+	Bit := theByte AND BitMask;
+	IF	Bit
+	THEN	Bit := 1
+	ENDIF;
+	BitMask := BitMask DIV 2
+	END getBit;
+
+PROCEDURE getBitStream(WORD number);
+	BEGIN
+	BitStream := 0;
+	WHILE number:[1] DO
+		getBit;
+		BitStream := 2 * BitStream + Bit;
+		number:[1] := number:[1] - 1
+	ENDWHILE
+	END getBitStream;
+
+PROCEDURE outWord;
+	BEGIN
+	outByte(BitStream[0]:[1]);
+	outByte(BitStream[1]:[1])
+	END outWord;
+
+PROCEDURE space;
+	BEGIN
+	printChar(' ')
+	END space;
+
+PROCEDURE PDCRelative;
+	BEGIN
+	printString(pdc[2 * BitStream]);
+	IF	BitStream
+	THEN	printString(@relative)
+	ENDIF;
+	getBitStream(16);
+	outWord;
+	space
+	END PDCRelative;
+
+PROCEDURE SpecialLinkItem;
+	STATIC WORD reverse, relative;
+
+	PROCEDURE Afield;
+		BEGIN
+		getBitStream(2);
+		relative := BitStream;
+		PDCRelative
+		END Afield;
+
+	PROCEDURE Bfield;
+		BEGIN
+		getBitStream(3);
+		counter := BitStream;
+		WHILE counter DO
+			getBitStream(8);
+			printChar(BitStream);
+			counter := counter - 1
+		ENDWHILE;
+		space
+		END Bfield;
+
+	BEGIN { SpecialLinkItem }
+	getBitStream(4);
+	printString(types[2 * BitStream]);
+	space;
+	CASE BitStream OF
+	0..4:	Bfield
+	END
+	5..8:	Afield;
+		Bfield
+	END
+	9..10,12..13:	Afield
+	END
+	{ Set location counter }
+	11:	Afield;
+		reverse:[1] := BitStream[1]:[1];
+		reverse[1]:[1] := BitStream:[1];
+		programCounter := reverse + defaultFirstLoadingAddress*(relative = 1)
+	END
+	14:	Afield;
+		BitMask := 0
+	END
+	15:	finis := true
+	END
+	ENDCASE
+	END SpecialLinkItem;
+
+PROCEDURE outWordColon(WORD x);
+	BEGIN
+	outByte(x[1]:[1]);
+	outByte(x[0]:[1]);
+	printChar(':')
+	END outWordColon;
+
+BEGIN
+printString(@logon);
+BitMask := 0;
+finis := false;
+absCount := 0;
+absByte := true;
+showProgramCounter := true;
+programCounter := defaultFirstLoadingAddress;
+relByteCounter := 102h; { first getBit increments }
+heap := LAST;
+REPEAT
+	IF	numberOfCharacters = 0
+	THEN	printString(@prompt)
+	ENDIF;
+	inputCapString(@fileName)
+UNTIL fileName[0]:[1];
+counter := @fileName;
+WHILE (counter^:[1] <> 0) AND (counter^:[1] <> '.') DO
+	counter := counter + 1
+ENDWHILE;
+IF	counter^:[1] = 0
+THEN	counter^:[5] := extension
+ENDIF;
+openread(@fileName, heap, @input);
+IF	input[errorStatusOffset]:[2] = errorDetected
+THEN	printString(@fileDoesNotExistString);
+	EXIT
+ENDIF;
+
+LOOP
+	ch := BDOS(directConsoleIOCmd, 0FFH);
+	IF	(ch = ctrlC) OR (ch = esc)
+	THEN	printString(@abortedString);
+		EXIT
+	ENDIF;
+	IF	finis <> false
+	THEN	EXIT
+	ENDIF;
+	getBit;
+	IF	Bit = 0
+	THEN	getBitStream(8);
+		IF	showProgramCounter
+		THEN	outWordColon(relByteCounter);
+			outWordColon(programCounter);
+			space;
+			showProgramCounter := false
+		ENDIF;
+		programCounter := programCounter + 1;
+		outByte(BitStream);
+		space;
+		absByte := true;
+		absCount := absCount + 1;
+		IF	absCount = absNum
+		THEN	absCount := 0;
+			printLn;
+			showProgramCounter := true
+		ENDIF
+	ELSE	getBitStream(2);
+		IF	absByte <> false
+		THEN	absByte := false;
+			IF	absCount
+			THEN	printLn;
+				absCount := 0;
+				showProgramCounter := true
+			ENDIF
+		ENDIF;
+		outWordColon(relByteCounter);
+		IF	BitStream = 0
+		THEN	SpecialLinkItem
+		ELSE	PDCRelative;
+			programCounter := programCounter + 2
+		ENDIF;
+		printLn;
+		showProgramCounter := true
+	ENDIF
+ENDLOOP;
+printLn
+END relDump.

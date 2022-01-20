@@ -1,0 +1,16 @@
+	.Z80
+
+	ENTRY	.AND
+
+; <HL> := <HL> AND <DE>	(16-bit)
+.AND:	LD	A,E
+	AND	L
+	LD	L,A	; <L> := <L> AND <E> (8-bit)
+	LD	A,D
+	AND	H
+	LD	H,A	; <H> := <H> AND <D> (8-bit)
+	XOR	A	; SPL expects cleared <A>
+	RET
+
+	END
+

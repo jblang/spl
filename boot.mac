@@ -1,0 +1,12 @@
+	.Z80
+	aseg
+	
+extrn		reboot
+.request	splrtlb
+
+	org	100h
+
+	jp	reboot
+
+	end
+

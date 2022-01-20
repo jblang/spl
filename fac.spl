@@ -1,0 +1,176 @@
+PROGRAM Factorial;
+
+{	Version history
+	- 06-Aug-2004, P. Schorn, introduced some optimizations
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	{ BDOS functions }
+	printCharCmd		= 02h;
+	printStringCmd		= 09h;
+	readConsoleStringCmd	= 0Ah;
+	commandLineAddress	= 80h;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	base			= 10;
+	digitsPerLine		= 75;
+	maxint			= 65535;
+	maxN			= maxint DIV (base - 1);
+				{ 9 * maxN does not create overflow }
+	margin			= 128;
+
+BYTE	commandLine		AT commandLineAddress;
+	commandLineLength	AT commandLineAddress;
+	commandLineBufferSize	AT commandLineAddress - 1;
+	t1		= 'Factorial of: $';
+	t3		= '! has $';
+	t4		= ' digit$';
+	tooLarge	= 'Argument too large - exiting.';
+	{ Immediately followed by crlfString }
+	crlfString	= (crlf, '$':[1]);
+WORD	i, m, n, factor, mul, carry, maxZ, previousCommandLineLength;
+	topMemory, charIndex = 1, ch = ' ', digitsP;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	IF	int << base
+	THEN	printChar(int + '0')
+	ELSE	printInt(int DIV base);
+		printChar(int MOD base + '0')
+	ENDIF
+	END printInt;
+
+PROCEDURE printLn;
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE getch;
+	BEGIN
+	IF	commandLineLength = 0
+	THEN	commandLineBufferSize := 128;
+		BDOS(readConsoleStringCmd, commandLineAddress - 1);
+		charIndex := 1
+	ENDIF;
+	IF	charIndex <<= commandLineLength
+	THEN	ch := commandLine[charIndex]:[1];
+		charIndex := charIndex + 1
+	ELSE	ch := 0
+	ENDIF;
+	RETURN ch
+	END getch;
+
+PROCEDURE inputInt;
+	BEGIN
+	n := 0;
+	getch;
+	WHILE ch = ' ' DO
+		getch
+	ENDWHILE;
+	WHILE	('0' <<= ch) AND (ch <<= '0' + base - 1) DO
+		n := base * n + ch - '0';
+		getch
+	ENDWHILE;
+	END inputInt;
+
+PROCEDURE top;
+	BYTE x;
+	BEGIN
+	RETURN @x
+	END top;
+
+PROCEDURE argumentTooLarge;
+	BEGIN
+	printString(@tooLarge);
+	HALT
+	END argumentTooLarge;
+
+BEGIN { Factorial }
+previousCommandLineLength := commandLineLength;
+n		:= maxint;
+digitsP		:= LAST;
+topMemory	:= top - margin;
+LOOP
+	m := n;
+	printLn;
+	printString(@t1);
+	inputInt;
+	IF	previousCommandLineLength <> 0
+	THEN	printInt(n)
+	ENDIF;
+	printLn;
+	IF	n >> maxN
+	THEN	argumentTooLarge
+	ENDIF;
+	IF	n >>= m
+	THEN	factor := m + 1
+	ELSE	factor := 2;
+		digitsP^[0]:[1] := 1;
+		maxZ := 0
+	ENDIF;
+	WHILE factor <<= n DO
+		i := 0;
+		carry := 0;
+		REPEAT
+			mul := factor * digitsP^[i]:[1] + carry;
+			digitsP^[i]:[1] := mul MOD base;
+			carry := mul DIV base;
+			i := i + 1
+		UNTIL i >> maxZ;
+		WHILE carry DO
+			digitsP^[i]:[1] := carry MOD base;
+			carry := carry DIV base;
+			i := i + 1
+		ENDWHILE;
+		maxZ := i - 1;
+		IF	maxZ + digitsP >>= topMemory
+		THEN	argumentTooLarge
+		ENDIF;
+		factor := factor + 1
+	ENDWHILE;
+	printLn;
+	mul := 0;
+	i := maxZ;
+	WHILE i <> -1 DO
+		printInt(digitsP^[i]:[1]);
+		mul := mul + 1;
+		IF	mul = digitsPerLine
+		THEN	printLn;
+			mul := 0
+		ENDIF;
+		i := i - 1
+	ENDWHILE;
+	IF	mul
+	THEN	printLn
+	ENDIF;
+	printLn;
+	printInt(n);
+	printString(@t3);
+	printInt(maxZ + 1);
+	printString(@t4);
+	IF	maxZ
+	THEN	printChar('s')
+	ENDIF;
+	printChar('.');
+	printLn;
+	IF	previousCommandLineLength <> 0
+	THEN	EXIT
+	ENDIF;
+	commandLineLength := 0
+ENDLOOP
+END Factorial.
+

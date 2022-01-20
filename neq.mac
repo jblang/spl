@@ -1,0 +1,36 @@
+	.Z80
+
+	ENTRY	.NEQ, .NNE
+
+; set carry flag if byte array of length <BC> starting at <HL>
+; is not equal to byte array of same length starting at <DE>
+; <HL> and <DE> remain unchanged
+.NEQ:	PUSH	HL		; save <HL>
+	PUSH	DE		; save <DE>
+AGAIN:	LD	A,(DE)		; <A> := <DE>^
+	CP	(HL)		; compare with <HL>^
+	JR	NZ,ISNEQ	; not equal implies byte arrays not equal
+				; now <HL>^ = <DE>^ implies carry flag not set
+	DEC	BC		; decrement length
+	LD	A,B
+	OR	C
+	JR	Z,ISEQ		; length equal 0 implies byte arrays are equal
+	INC	DE		; point to next byte
+	INC	HL		; point to next byte
+	JR	AGAIN		; repeat
+
+ISNEQ:	XOR	A		; first clear <A>
+	SCF			; and then set carry flag for not equal
+ISEQ:	POP	DE		; restore <DE>
+	POP	HL		; restore <HL>
+	RET			; done
+
+; set carry flag if byte array of length <BC> starting at <HL>
+; is equal to byte array of same length starting at <DE>
+; <HL> and <DE> remain unchanged
+.NNE:	CALL	.NEQ		; call complement
+	CCF			; complement result
+	RET			; done
+
+	END
+

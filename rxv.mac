@@ -1,0 +1,23 @@
+	.Z80
+
+	ENTRY	.RXV
+	EXTRN	.RMV2
+
+;	return from a procedure which has more than 255 bytes of
+;	local parameters and at most 255 bytes of local variables
+;	<DE> = sizeLocalParameters  (number of bytes of all local parameters)
+;	<B> = sizeLocalVariables    (number of bytes of all local variables)
+;	<HL> is unchanged as it may contain a function result
+.RXV:	EX	DE,HL		; save <HL> into <DE>, <HL>=sizeLocalParameters
+	LD	C,L		; <C> = lower byte of sizeLocalParameters
+	LD	L,B		; <L> = sizeLocalVariables
+	LD	B,H		; <BC> = sizeLocalParameters
+	LD	H,A		; <HL> = sizeLocalVariables
+	ADD	HL,SP		; compute new <SP>
+	LD	SP,HL		; and load it
+	LD	L,C
+	LD	H,B		; <HL> = sizeLocalParameters
+	JP	.RMV2
+
+	END
+

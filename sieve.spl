@@ -1,0 +1,241 @@
+PROGRAM sieve;
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+
+CONST	{ BDOS functions }
+	printCharCmd		= 02h;
+	directConsoleIOCmd	= 06h;
+	printStringCmd		= 09h;
+	readConsoleStringCmd	= 0Ah;
+	commandLineAddress	= 80h;
+	cr			= 13;
+	lf			= 10;
+
+WORD	BDOSResult;
+
+PROCEDURE BDOSSaveResult(WORD function, input);
+	BEGIN
+	BDOSResult := BDOS(function:[1], input)
+	END BDOSSaveResult;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOSSaveResult(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOSSaveResult(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	IF	int <<= 9
+	THEN	printChar(int + '0')
+	ELSE	printInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printInt;
+
+PROCEDURE printLn;
+	STATIC BYTE crlfString = (cr:[1], lf:[1], '$');
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+BYTE	commandLine		AT commandLineAddress;
+	commandLineLength	AT commandLineAddress;
+	commandLineBufferSize	AT commandLineAddress - 1;
+WORD	charIndex = 1;
+	ch = ' ';
+
+PROCEDURE getch;
+	BEGIN
+	IF	commandLineLength = 0
+	THEN	commandLineBufferSize := 128;
+		BDOSSaveResult(readConsoleStringCmd, commandLineAddress - 1);
+		charIndex := 1
+	ENDIF;
+	IF	charIndex <<= commandLineLength
+	THEN	ch := commandLine[charIndex]:[1];
+		charIndex := charIndex + 1
+	ELSE	ch := 0
+	ENDIF;
+	RETURN ch
+	END getch;
+
+PROCEDURE inputInt;
+	STATIC WORD result, sign;
+	BEGIN
+	result := 0;
+	sign := +1;
+	getch;
+	WHILE ch = ' ' DO
+		getch
+	ENDWHILE;
+	IF	ch = '-'
+	THEN	sign := -1;
+		getch
+	ENDIF;
+	WHILE	('0' <<= ch) AND (ch <<= '9') DO
+		result := 10 * result + ch - '0';
+		getch
+	ENDWHILE;
+	RETURN sign * result
+	END inputInt;
+
+CONST	false = 0, true = 1, crlf = cr + 256 * lf;
+	numperline = 12, spaces = 6, bell = 7;
+
+WORD	f, i, p, sievebegin, sieveend, minfactor;
+	sievesize, numberofprimes, maxprime, printflag;
+BYTE	prompt = (crlf, 'Upperlimit for the primes: $');
+	signon = (crlf, 'SIEVE      V1.03  (26-Jul-2004)', crlf, '$':[1]);
+	question = (crlf, 'Display primes on the screen? (Y/N) $');
+	notallowed = (crlf, 'Please enter Y or N!', crlf, '$':[1]);
+	num = (crlf, 'Number of computed primes: $');
+WORD	table = (10000, 1000, 100, 10, 1);
+	tp, count, pot, pflag, digit;
+
+PROCEDURE outputlfint(WORD int, len);
+
+	PROCEDURE spaces(WORD n);
+		BEGIN
+		WHILE n > 0 DO
+			n := n - 1, printChar(' ')
+		ENDWHILE
+		END spaces;
+
+	BEGIN { outputlfint }
+	spaces(len - 5), tp := @table, count := 5, pflag := false;
+	REPEAT
+		digit := 0, pot := tp^, tp := tp + 2;
+		WHILE int >>= pot DO
+			digit := digit + 1, int := int - pot
+		ENDWHILE;
+		count := count - 1;
+		IF	(digit <> 0) OR (count = 0) OR (pflag = true)
+		THEN	printChar(digit + '0'), pflag := true
+		ELSE	printChar(' ')
+		ENDIF
+	UNTIL count = 0
+	END outputlfint;
+
+PROCEDURE initialize;
+	PROCEDURE LAST; EXTERNAL;
+
+	PROCEDURE clearsieve;
+		BEGIN
+		i := sievebegin;
+		WHILE i <<= sieveend DO
+			i^:[1] := true, i := i + 1
+		ENDWHILE
+		END clearsieve;
+
+	PROCEDURE getsievesize;
+
+		PROCEDURE sqrt(WORD int);
+			BYTE	low, medium, n;
+			WORD	high;
+
+			BEGIN { getsievesize }
+			n := 8, low := 0, high := 256;
+			REPEAT
+				medium := (low + high) DIV 2;
+				IF	medium * medium >> int
+				THEN	high := medium
+				ELSE	low := medium
+				ENDIF;
+				n := n - 1
+			UNTIL n = 0;
+			RETURN low
+			END sqrt;
+
+		BEGIN { getsievesize }
+		IF	commandLineLength = 0
+		THEN	printString(@prompt)
+		ENDIF;
+		maxprime := inputInt;
+		minfactor := sqrt(maxprime);
+		IF	minfactor AND 1 <> 0
+		THEN	minfactor := minfactor + 1
+		ENDIF;
+		sievesize := minfactor * (minfactor DIV 2)
+		END getsievesize;
+
+	BEGIN { initialize }
+	sievebegin := LAST;
+	getsievesize;
+	sieveend := sievebegin + sievesize;
+	clearsieve
+	END initialize;
+
+PROCEDURE calculateprimes;
+	BEGIN
+	p := sievebegin;
+	f := 3;
+	WHILE f <<= minfactor DO
+		i := p;
+		WHILE i <<= sieveend DO
+			i := i + f, i^:[1] := false
+		ENDWHILE;
+		REPEAT
+			p := p + 1, f := f + 2
+		UNTIL p^:[1] = true
+	ENDWHILE
+	END calculateprimes;
+
+PROCEDURE printprimes;
+
+	PROCEDURE print(WORD int);
+		BEGIN
+		numberofprimes := numberofprimes + 1;
+		ch := BDOS(directConsoleIOCmd, 0ffh);
+		IF	ch <> 0
+		THEN	printflag := false
+		ELSIF	printflag = true
+		THEN	outputlfint(int, spaces);
+			i := i + 1;
+			IF	i = numperline
+			THEN	printLn;
+				i := 0
+			ENDIF
+		ENDIF
+		END print;
+
+	BEGIN { printprimes }
+	numberofprimes := 0, p := sievebegin, f := 3, i := 0, print(2);
+	WHILE p <<= sieveend DO
+		IF	p^:[1] = true
+		THEN	print(f)
+		ENDIF;
+		f := f + 2, p := p + 1
+	ENDWHILE;
+	IF	i <> 0
+	THEN	printLn
+	ENDIF;
+	printString(@num), outputlfint(numberofprimes, spaces), printLn
+	END printprimes;
+
+BEGIN
+printString(@signon);
+initialize;
+calculateprimes;
+LOOP
+	commandLineLength := 0;
+	printString(@question);
+	ch := getch;
+	IF	(ch >>= 'a') AND (ch <<= 'z')
+	THEN	ch := ch + ('A' - 'a')
+	ENDIF;
+	IF	(ch = 'Y') OR (ch = 0)
+	THEN	printflag := true, printLn, EXIT
+	ELSIF	ch = 'N'
+	THEN	printflag := false, EXIT
+	ELSE	printString(@notallowed)
+	ENDIF
+ENDLOOP;
+printprimes;
+printString(@signon)
+END sieve.
+

@@ -1,0 +1,175 @@
+PROGRAM SystemCopy;
+
+{	Version history
+	- 01-Aug-2004, P. Schorn, applied some optimizations
+	- 01-Jul-2004, P. Schorn, changed standard procedures
+	- 30-Mar-2002, P. Schorn, cleaned up data types
+	- 24-Mar-2002, P. Schorn, added force Z80 CPU
+}
+
+PROCEDURE BIOS(WORD function, input);	EXTERNAL;
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+
+CONST	{ CP/M 2 and CP/M 3 BIOS }
+	SELDSK			= 8;
+	SETTRK			= 9;
+	SETSEC			= 10;
+	SETDMA			= 11;
+	READ			= 12;
+	WRITE			= 13;
+	{ CP/M 3 BIOS only }
+	SETBNK			= 27;
+	commandLineAddress	= 80h;
+	printCharCMD		= 2h;
+	printStringCMD		= 9h;
+	versionNumberCMD	= 0ch;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	eof			= 1ah;
+	recordSize		= 128;
+
+BYTE 	commandLineLength	AT commandLineAddress;
+	sourceDriveLetter	AT commandLineAddress + 2;
+	sourceColon		AT commandLineAddress + 3;
+	space			AT commandLineAddress + 4;
+	destDriveLetter		AT commandLineAddress + 5;
+	destColon		AT commandLineAddress + 6;
+	usage = ('SYSCOPY [<source>:] <dest>:', crlf,
+	'  copies the system tracks from <source>: or A: to <dest>:', crlf, '$':[1]);
+	signon = (crlf,'SYSCOPY V-1.09 (01-Aug-2004)', crlf, '$':[1]);
+	readError = ('Read error on track $');
+	middle1Error = (' and sector $');
+	middle2Error = (' occured (error $');
+	finalError = (').', crlf, '$':[1]);
+	writeError = ('Write error on track $');
+	tracksMsg = ('Reserved tracks = $');
+	sectorsMsg = (', sectors per track = $');
+	crlfMsg = (crlf, '$':[1]);
+	destError = ('Destination drive not compatible with source.', crlf, '$':[1]);
+	signoff = (' sectors written.', crlf, '$':[1]);
+BYTE[recordSize]	buffer = (
+	crlf, crlf, 'Copyright 2001 by Peter Schorn, peter.schorn@acm.org', crlf, crlf, eof:[1]);
+WORD	reservedTracks, sectorsPerTrack, currentTrack;
+	destDrive, sourceDrive, delta, currentSector, totalSectors, cpmResult, error;
+
+PROCEDURE CPM2(WORD function, input);
+	BEGIN
+	cpmResult := BDOS(function:[1], input)
+	END CPM2;
+
+PROCEDURE BIOS2(WORD function, input);
+	BEGIN
+	cpmResult := BIOS(function, input)
+	END BIOS2;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	CPM2(printStringCMD, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	CPM2(printCharCMD, char)
+	END printChar;
+
+PROCEDURE printUnsignedInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printUnsignedInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printUnsignedInt;
+
+PROCEDURE showError;
+	BEGIN
+	printUnsignedInt(currentTrack);
+	printString(@middle1Error);
+	printUnsignedInt(currentSector);
+	printString(@middle2Error);
+	printUnsignedInt(error);
+	printString(@finalError)
+	END showError;
+
+PROCEDURE positionHead;
+	BEGIN
+	BIOS2(SETTRK, currentTrack);
+	BIOS2(SETSEC, currentSector)
+	END positionHead;
+
+PROCEDURE checkCPM3;
+	BEGIN
+	IF	delta >> 10
+	THEN	BIOS2(SETBNK, 1)
+	ENDIF
+	END checkCPM3;
+
+BEGIN
+printString(@signon);
+IF	(commandLineLength = 3) AND (sourceColon = ':') AND
+	('A' << sourceDriveLetter) AND (sourceDriveLetter <<= 'P')
+THEN	sourceDrive := 0;
+	destDrive := sourceDriveLetter - 'A'
+ELSIF	(commandLineLength = 6) AND (sourceColon = ':') AND (destColon = ':') AND
+	('A' <<= sourceDriveLetter) AND (sourceDriveLetter <<= 'P') AND
+	('A' <<= destDriveLetter) AND (destDriveLetter <<= 'P') AND
+	(sourceDriveLetter <> destDriveLetter)
+THEN	sourceDrive := sourceDriveLetter - 'A';
+	destDrive := destDriveLetter - 'A'
+ELSE	printString(@usage);
+	EXIT
+ENDIF;
+
+CPM2(versionNumberCMD, 0);
+IF	cpmResult << 30h
+THEN	delta := 10
+ELSE	delta := 12
+ENDIF;
+BIOS2(256 + SELDSK, sourceDrive);
+sectorsPerTrack := cpmResult^[delta]^;
+reservedTracks := cpmResult^[delta]^[13];
+printString(@tracksMsg);
+printUnsignedInt(reservedTracks);
+printString(@sectorsMsg);
+printUnsignedInt(sectorsPerTrack);
+printString(@crlfMsg);
+BIOS2(256 + SELDSK, destDrive);
+IF	(sectorsPerTrack <> cpmResult^[delta]^) OR (reservedTracks <> cpmResult^[delta]^[13])
+THEN	printString(@destError);
+	EXIT
+ENDIF;
+
+currentTrack := 0;
+totalSectors := 0;
+WHILE currentTrack << reservedTracks DO
+	currentSector := 1;
+	WHILE currentSector <<= sectorsPerTrack DO
+		checkCPM3;
+		BIOS2(SETDMA, @buffer);
+		BIOS2(SELDSK, sourceDrive);
+		positionHead;
+		BIOS2(READ, 0);
+		IF	cpmResult = 0
+		THEN	checkCPM3;
+			BIOS2(SELDSK, destDrive);
+			positionHead;
+			BIOS2(WRITE, 0);
+			IF	cpmResult = 0
+			THEN	totalSectors := totalSectors + 1
+			ELSE	error := cpmResult;
+				printString(@writeError);
+				showError
+			ENDIF
+		ELSE	error := cpmResult;
+			printString(@readError);
+			showError
+		ENDIF;
+		currentSector := currentSector + 1
+	ENDWHILE;
+	currentTrack := currentTrack + 1
+ENDWHILE;
+printUnsignedInt(totalSectors);
+printString(@signoff)
+END SystemCopy.
+

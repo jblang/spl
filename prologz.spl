@@ -1,0 +1,2224 @@
+PROGRAM PrologZ;
+
+{	Version history
+	- 22-Mar-2015, P. Schorn, compatibility with new SPL compiler
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+PROCEDURE CLEAR2(WORD start, size);	EXTERNAL;
+PROCEDURE RESTAR;			EXTERNAL;
+PROCEDURE NEXTN;			EXTERNAL;
+PROCEDURE LASTN;			EXTERNAL;
+PROCEDURE MOVE(WORD s, e, d);		EXTERNAL;
+PROCEDURE CHECK;			EXTERNAL;
+
+PROCEDURE traverse;			FORWARD;
+PROCEDURE show(WORD struct);		FORWARD;
+PROCEDURE term;				FORWARD;
+
+CONST	cr = 13, lf = 10, crlf = cr + 256 * lf, eof = 1AH, tab = 9, ctrlC = 'C' - 64, esc = 27;
+	bs = 8, ctrlS = 'S' - 64, ctrlD = 'D' - 64, del = 127, ctrlX = 'X' - 64, ctrlR = 'R' - 64;
+	ctrlG = 'G' - 64, ctrlB = 'B' - 64, ctrlO = 'O' - 64, ctrlE = 'E' - 64, ctrlY = 'Y' - 64;
+	ctrlK = 'K' - 64, ctrlL = 'L' - 64, ctrlV = 'V' - 64, ctrlN = 'N' - 64;
+	open_file = 15, read_sequential = 20, set_dma_address = 26;
+	write_sequential = 21, make_file = 22, close_2file = 16;
+	compute_file_size = 35, delete_file = 19, search_for_first = 17;
+	search_for_next = 18, recordSize = 128;
+	varValSize = 32, hashSize = 32, queryBufferSize = 128, safetyMargin = 128;
+	fileNameSize = 17, maxVar = 32, namesPerLine = 4;
+	limit = 23;	{ Number of predefined predicates. limit must be equal to the maximum	}
+			{ number for a predefined predicate.					}
+	add = 1, sub = 2, mul = 3, div2 = 4, mod2 = 5, ge = 6, var = 7, integer = 8, atom2 = 9;
+	write2 = 10, nl = 11, univ = 12, writeq = 13, fail = 14, getclause = 15, numclause = 16;
+	chr = 17, trace = 18, notrace = 19, name = 20, get0 = 21, open = 22, close2 = 23;
+	maxPar = 3;
+	next = 0, value = -2, type = 0, down = 3, firstAxiom = 2, chars = 4, listValue = 2;
+	noQuestion = 0, successQuestion = 1, failQuestion = 2;
+	anonymousName = 2;
+	memory = 0, terminal = 1, file2 = 2, varCounterSave = 2, replacementList = 0;
+	identSym = 0, varSym = 1, numberSym = 2, ifSym = 3, cutSym = 4, dotSym = 5;
+	leftSqrBrk = 6, commaSym = 7, rightSqrBrk = 8, rightRndBrk = 9, leftRndBrk = 10;
+	barSym = 11, otherSym = 12, eofSym = 13;
+	predicate = 0, variable = 1, cardinal = 2, cut = 3, atom = 4, dot = 5, nilDot = 6;
+	bracket = 7;
+	number = 0;
+	fcbSize = 36, FALSE = 0, TRUE = 1, NIL = 0, noDataBase = 2, full = 0, split = 1;
+	direct_console_io = 6;
+
+BYTE	tversion = (cr:[1], '   ', crlf, 'PROLOGZ V3.12 (15-May-85)  CINET', crlf,
+	lf:[1], 0:[1]);
+	{ CINET : place for serial number
+	X	: not serialized
+	B	: terminal io via BIOS jump vector
+	C	: terminal io via CP/M function 6 (direct_console_io) }
+
+{ terminal definition area, similar to WordStar }
+{ initialised for ANSI terminals, P. Schorn, 18-Nov-01 }
+BYTE	maxLine		=  24:[1];
+	maxColumn	=  80:[1];
+BYTE[9]	clead1		= (02:[1], esc:[1], '[':[1], 0, 0, 0);
+BYTE[5]	clead2		= (1:[1], ';':[1], 0:[1], 0);
+	ctrail		= (1:[1], 'H':[1], 0:[1], 0);
+BYTE	cb4lfg		=  0:[1];
+	linoff		=  1:[1];
+	coloff		=  1:[1];
+	ascur		=  2:[1];
+BYTE[6]	eraeol		= (3:[1], esc:[1], '[':[1], 'K':[1], 0);
+	init		= (0:[1], 0:[1], 0, 0);
+	reset		= (0:[1], 0:[1], 0, 0);
+
+BYTE[recordSize]
+	buffer = (crlf,
+	'Copyright (c) 1985', crlf,
+	'by   Peter  Schorn', crlf,
+	'Prinz-Eugen-Str. 6', crlf,
+	'D-8000 Muenchen 40', crlf,
+	'Tel. 089/300 25 78', crlf,
+	'Serialnumber X****', crlf,
+	lf:[1], 0:[1], eof:[1]);
+
+BYTE[fileNameSize]
+	fileName;
+BYTE	charSymTable = (
+	eofSym:[1],		{ chr( 26) }
+	otherSym:[1],		{ chr( 27) }
+	otherSym:[1],		{ chr( 28) }
+	otherSym:[1],		{ chr( 29) }
+	otherSym:[1],		{ chr( 30) }
+	otherSym:[1],		{ chr( 31) }
+	otherSym:[1],		{ chr( 32) }
+	cutSym:[1],		{ chr( 33) = ! }
+	otherSym:[1],		{ chr( 34) = " }
+	otherSym:[1],		{ chr( 35) = # }
+	otherSym:[1],		{ chr( 36) = $ }
+	otherSym:[1],		{ chr( 37) = % }
+	otherSym:[1],		{ chr( 38) = & }
+	identSym:[1],		{ chr( 39) = ' }
+	leftRndBrk:[1],		{ chr( 40) = ( }
+	rightRndBrk:[1],	{ chr( 41) = ) }
+	otherSym:[1],		{ chr( 42) = * }
+	numberSym:[1],		{ chr( 43) = + }
+	commaSym:[1],		{ chr( 44) = , }
+	numberSym:[1],		{ chr( 45) = - }
+	dotSym:[1],		{ chr( 46) = . }
+	otherSym:[1],		{ chr( 47) = / }
+	numberSym:[1],		{ chr( 48) = 0 }
+	numberSym:[1],		{ chr( 49) = 1 }
+	numberSym:[1],		{ chr( 50) = 2 }
+	numberSym:[1],		{ chr( 51) = 3 }
+	numberSym:[1],		{ chr( 52) = 4 }
+	numberSym:[1],		{ chr( 53) = 5 }
+	numberSym:[1],		{ chr( 54) = 6 }
+	numberSym:[1],		{ chr( 55) = 7 }
+	numberSym:[1],		{ chr( 56) = 8 }
+	numberSym:[1],		{ chr( 57) = 9 }
+	ifSym:[1],		{ chr( 58) = : }
+	otherSym:[1],		{ chr( 59) = ; }
+	otherSym:[1],		{ chr( 60) = < }
+	otherSym:[1],		{ chr( 61) = = }
+	otherSym:[1],		{ chr( 62) = > }
+	otherSym:[1],		{ chr( 63) = ? }
+	otherSym:[1],		{ chr( 64) = @ }
+	varSym:[1],		{ chr( 65) = A }
+	varSym:[1],		{ chr( 66) = B }
+	varSym:[1],		{ chr( 67) = C }
+	varSym:[1],		{ chr( 68) = D }
+	varSym:[1],		{ chr( 69) = E }
+	varSym:[1],		{ chr( 70) = F }
+	varSym:[1],		{ chr( 71) = G }
+	varSym:[1],		{ chr( 72) = H }
+	varSym:[1],		{ chr( 73) = I }
+	varSym:[1],		{ chr( 74) = J }
+	varSym:[1],		{ chr( 75) = K }
+	varSym:[1],		{ chr( 76) = L }
+	varSym:[1],		{ chr( 77) = M }
+	varSym:[1],		{ chr( 78) = N }
+	varSym:[1],		{ chr( 79) = O }
+	varSym:[1],		{ chr( 80) = P }
+	varSym:[1],		{ chr( 81) = Q }
+	varSym:[1],		{ chr( 82) = R }
+	varSym:[1],		{ chr( 83) = S }
+	varSym:[1],		{ chr( 84) = T }
+	varSym:[1],		{ chr( 85) = U }
+	varSym:[1],		{ chr( 86) = V }
+	varSym:[1],		{ chr( 87) = W }
+	varSym:[1],		{ chr( 88) = X }
+	varSym:[1],		{ chr( 89) = Y }
+	varSym:[1],		{ chr( 90) = Z }
+	leftSqrBrk:[1],		{ chr( 91) = [ }
+	otherSym:[1],		{ chr( 92) = \ }
+	rightSqrBrk:[1],	{ chr( 93) = ] }
+	otherSym:[1],		{ chr( 94) = ^ }
+	varSym:[1],		{ chr( 95) = _ }
+	otherSym:[1],		{ chr( 96) = ` }
+	identSym:[1],		{ chr( 97) = a }
+	identSym:[1],		{ chr( 98) = b }
+	identSym:[1],		{ chr( 99) = c }
+	identSym:[1],		{ chr(100) = d }
+	identSym:[1],		{ chr(101) = e }
+	identSym:[1],		{ chr(102) = f }
+	identSym:[1],		{ chr(103) = g }
+	identSym:[1],		{ chr(104) = h }
+	identSym:[1],		{ chr(105) = i }
+	identSym:[1],		{ chr(106) = j }
+	identSym:[1],		{ chr(107) = k }
+	identSym:[1],		{ chr(108) = l }
+	identSym:[1],		{ chr(109) = m }
+	identSym:[1],		{ chr(110) = n }
+	identSym:[1],		{ chr(111) = o }
+	identSym:[1],		{ chr(112) = p }
+	identSym:[1],		{ chr(113) = q }
+	identSym:[1],		{ chr(114) = r }
+	identSym:[1],		{ chr(115) = s }
+	identSym:[1],		{ chr(116) = t }
+	identSym:[1],		{ chr(117) = u }
+	identSym:[1],		{ chr(118) = v }
+	identSym:[1],		{ chr(119) = w }
+	identSym:[1],		{ chr(120) = x }
+	identSym:[1],		{ chr(121) = y }
+	identSym:[1],		{ chr(122) = z }
+	otherSym:[1],		{ chr(123) = left_curly_bracket }
+	barSym:[1],		{ chr(124) = | }
+	otherSym:[1],		{ chr(125) = right_curly_bracket }
+	otherSym:[1]		{ chr(126) = ~ });
+
+	tyes		= ('Yes',	crlf, lf:[1],		0:[1]);
+	tno		=  ('No',	crlf, lf:[1],		0:[1]);
+	toutOfMemory	= ('Out of memory',			0:[1]);
+	ttooComplex	= ('Expression too complex',		0:[1]);
+	temptyDataBase	= ('Database empty',			0:[1]);
+	tdelete		= (bs:[1], ' ':[1], bs:[1],		0:[1]);
+	tbreak		= ('Break',				0:[1]);
+	tyn		= ('? (Y/N) ',				0:[1]);
+	tsave2		= ('Save database',			0:[1]);
+	tcontinue	= ('Continue',				0:[1]);
+	texit2		= ('Exit',				0:[1]);
+	tfileName	= ('Enter filename for ',		0:[1]);
+	tLoad		= ('load',				0:[1]);
+	tMerge		= ('merge',				0:[1]);
+	tSave		= ('save',				0:[1]);
+	tif		= (':-',				0:[1]);
+	temptyList	= ('[]',				0:[1]);
+	tdiskFull	= ('Disk full',				0:[1]);
+	tdirFull	= ('Directory full',			0:[1]);
+	tfileNotFound	= ('File not found', crlf, lf:[1],	0:[1]);
+	tfileTooBig	= ('File too big', crlf, lf:[1],	0:[1]);
+	teditDataBase	= ('Edit database',			0:[1]);
+	teditQuery	= ('Edit query',			0:[1]);
+	terr1		= (crlf, 'Too many variables in: ',	0:[1]);
+	terr3		= ("'.' expected",			0:[1]);
+	terr4		= ('Literal expected',			0:[1]);
+	terr5		= ("'.' or ':-' expected",		0:[1]);
+	terr8		= ('Illegal symbol at begin of term',	0:[1]);
+	terr9		= ("']' expected",			0:[1]);
+	terr10		= ("')' expected",			0:[1]);
+	terr11		= ('"':[1],"'":[1],'" expected',	0:[1]);
+	terr12		= ("Can't redefine system predicate",	0:[1]);
+	tundef		= (crlf, 'Undefined predicate: ',	0:[1]);
+	tInsert		= ('Insert ',				0:[1]);
+	tTrace		= ('Trace ',				0:[1]);
+	tOn		= ('on',				0:[1]);
+	tOff		= ('off',				0:[1]);
+	predef		= (writeq:[1], 'writeq', var:[1], 'var', integer:[1], 'integer',
+			atom2:[1], 'atom', write2:[1], 'write', nl:[1], 'nl', univ:[1], 'univ',
+			univ:[1], '=..', ge:[1], 'ge', ge:[1], '>=', add:[1], 'add', sub:[1],
+			'sub', mul:[1], 'mul', div2:[1], 'div', mod2:[1], 'mod2', add:[1], '+':[1],
+			sub:[1], '-':[1], mul:[1], '*':[1], div2:[1], '/':[1], fail:[1], 'fail',
+			getclause:[1], 'getclause', numclause:[1], 'numclause', chr:[1], 'put',
+			trace:[1], 'trace', notrace:[1], 'notrace', name:[1], 'name', get0:[1],
+			'get0', mod2:[1], '%':[1], open:[1], 'open', close2:[1], 'close', 0:[1]);
+WORD	n AT 00060H;
+	dataBase, heap, sym, symValue, strp, ch, i, j, k, maxLine1;
+	h, theorem, currentOutput, lastAxiom, p1, p2, oldHeap, nameList;
+	dummy, varCounter, success, shouldContinue, errorMessage, scope, what, level;
+	rule, evaluate, answer, minusFlag, restMessage, openedFile = FALSE,
+	hh, lastHead, parNumber, traceFlag, askStatus, hash, endTheorem;
+	bufferValid = TRUE, setQuotes, printQuotes, char, top, actTheorem;
+	actListp, bufferPointer, listLevel, qendp, qbufferp, fendp, maxRecord;
+	bufferLimit, changeFlag, changeDataBase, outCh, checkMode;
+WORD[hashSize]
+	names, oldNames;
+BYTE[fcbSize]
+	File;
+WORD[maxPar]
+	parValue, parType, parVal;
+WORD[maxVar + 1]
+	varp, queryVarp;
+WORD[maxVar]
+	firstAxioms;
+WORD[varValSize]
+	varVal;
+BYTE[queryBufferSize]
+	queryBuffer;
+WORD	line;		{ line of cursor, 0..maxLine - 1			}
+	column;		{ column of cursor, 0..maxColumn			}
+	startp;		{ start of text, points to first character of text	}
+	endp;		{ end of text, points to CR				}
+	lineLength;	{ length of current line				}
+	bufferp;	{ pointer to actual position in buffer			}
+	insertFlag, ctrlBFlag, oldLine, delta, selection, inputCharacter;
+BYTE	menu = (' Load  Merge  Save  Database  Query  Trace  Notrace  Files  ');
+BYTE	tExit = ('Exit ', 0:[1]);
+BYTE[11]
+	searchMask = ('????????PRO');
+BYTE	defExt = ('.PRO   ',0:[1]);
+
+PROCEDURE CreateFile;
+	BEGIN
+	BDOS(delete_file, @File), h := BDOS(make_file, @File);
+	bufferPointer := @buffer, errorMessage := 0;
+	IF	h = 0FFH
+	THEN	errorMessage := @tdirFull
+	ENDIF
+	END CreateFile;
+
+PROCEDURE BusyRead(WORD chp);
+	BEGIN
+	chp^:[2] := BDOS(direct_console_io, 0FFH)
+	END BusyRead;
+
+PROCEDURE Write(WORD ch);
+	WORD status AT 0062H;
+	BEGIN
+	status := BDOS(direct_console_io, ch)
+	END Write;
+
+PROCEDURE checkError;
+	BEGIN
+	IF	errorMessage <> 0
+	THEN	RESTAR
+	ENDIF
+	END checkError;
+
+PROCEDURE setDMA;
+	BEGIN
+	BDOS(set_dma_address, @buffer), bufferPointer := @buffer
+	END setDMA;
+
+PROCEDURE incBufferPointer;
+	BEGIN
+	bufferPointer := bufferPointer + 1
+	END incBufferPointer;
+
+PROCEDURE writeBuffer;
+	BEGIN
+	setDMA;
+	IF	errorMessage = 0
+	THEN	IF	BDOS(write_sequential, @File) <> 0
+		THEN	errorMessage := @tdiskFull
+		ENDIF
+	ENDIF
+	END writeBuffer;
+
+PROCEDURE close;
+	BEGIN
+	IF	bufferPointer >> @buffer
+	THEN	WHILE bufferPointer << @buffer + recordSize DO
+			bufferPointer^:[1] := eof, incBufferPointer
+		ENDWHILE;
+		writeBuffer
+	ENDIF;
+	BDOS(close_2file, @File)
+	END close;
+
+PROCEDURE outCharacter(WORD ch);
+
+	PROCEDURE outBuffer;
+		BEGIN
+		IF	bufferPointer = @buffer + recordSize
+		THEN	writeBuffer
+		ENDIF;
+		bufferPointer^:[1] := outCh, incBufferPointer
+		END outBuffer;
+
+	BEGIN { outCharacter }
+	outCh := ch:[1];
+	IF	currentOutput = memory
+	THEN	heap^:[1] := outCh, heap := heap + 1
+	ELSIF	currentOutput = file2
+	THEN	outBuffer
+	ELSE	Write(outCh);
+		IF	openedFile <> FALSE
+		THEN	outBuffer, checkError
+		ENDIF
+	ENDIF
+	END outCharacter;
+
+PROCEDURE terminalString(WORD sp);
+	BEGIN
+	p2 := sp, p1 := p2^:[1];
+	WHILE p1 >> 0 DO
+		p1 := p1 - 1, p2 := p2 + 1, outCharacter(p2^:[1])
+	ENDWHILE
+	END terminalString;
+
+PROCEDURE outString(WORD stringp);
+	BEGIN
+	WHILE stringp^:[1] <> 0 DO
+		outCharacter(stringp^:[1]), stringp := stringp + 1
+	ENDWHILE
+	END outString;
+
+PROCEDURE outSpace;
+	BEGIN
+	outCharacter(' ')
+	END outSpace;
+
+PROCEDURE outComma;
+	BEGIN
+	outCharacter(',')
+	END outComma;
+
+PROCEDURE outCr;
+	BEGIN
+	outCharacter(cr)
+	END outCr;
+
+PROCEDURE spaces(WORD number);
+	BEGIN
+	WHILE number > 0 DO
+		outSpace, number := number - 1
+	ENDWHILE
+	END spaces;
+
+PROCEDURE newLine;
+	BEGIN
+	outCr;
+	IF	currentOutput <> memory
+	THEN	outCharacter(lf)
+	ENDIF
+	END newLine;
+
+PROCEDURE nlNlSetAsk;
+	BEGIN
+	newLine, newLine, askStatus := noQuestion
+	END nlNlSetAsk;
+
+PROCEDURE outCardinal(WORD cardinal);
+	BEGIN
+	IF	cardinal <<= 9
+	THEN	outCharacter(cardinal + '0')
+	ELSE	outCardinal(cardinal DIV 10), outCharacter(cardinal MOD 10 + '0')
+	ENDIF
+	END outCardinal;
+
+PROCEDURE outInteger(WORD integer);
+	BEGIN
+	IF	integer < 0
+	THEN	outCharacter('-'), outCardinal(-integer)
+	ELSE	outCardinal(integer)
+	ENDIF
+	END outInteger;
+
+PROCEDURE CAP(WORD chp);
+	BEGIN
+	dummy := chp^:[1];
+	IF	(dummy >>= 'a') AND (dummy <<= 'z')
+	THEN	chp^:[1] := dummy + ('A' - 'a')
+	ENDIF
+	END CAP;
+
+PROCEDURE noSuccess;
+	BEGIN
+	success := FALSE
+	END noSuccess;
+
+PROCEDURE setTrace;
+	BEGIN
+	traceFlag := TRUE
+	END setTrace;
+
+PROCEDURE resetTrace;
+	BEGIN
+	traceFlag := FALSE
+	END resetTrace;
+
+PROCEDURE setPrintQuotes;
+	BEGIN
+	printQuotes := TRUE
+	END setPrintQuotes;
+
+PROCEDURE incH;
+	BEGIN
+	h := h + 1
+	END incH;
+
+PROCEDURE incI;
+	BEGIN
+	i := i + 1
+	END incI;
+
+PROCEDURE incK;
+	BEGIN
+	k := k + 1
+	END incK;
+
+PROCEDURE nextK;
+	BEGIN
+	k := k^[next]
+	END nextK;
+
+PROCEDURE nextH;
+	BEGIN
+	h := h^[next]
+	END nextH;
+
+PROCEDURE noMemory;
+	BEGIN
+	errorMessage := @toutOfMemory, RESTAR
+	END noMemory;
+
+PROCEDURE decH;
+	BEGIN
+	h := h - 1
+	END decH;
+
+PROCEDURE clearFCB;
+	BEGIN
+	CLEAR2(@File, fcbSize), i := 1;
+	REPEAT
+		File[i]:[1] := ' ', incI
+	UNTIL	i = 12
+	END clearFCB;
+
+PROCEDURE createFCB;
+
+	PROCEDURE nextCh;
+		BEGIN
+		ch := k^:[1], CAP(@ch), incK
+		END nextCh;
+
+	BEGIN { createFCB }
+	clearFCB;
+	REPEAT
+		nextCh
+	UNTIL	ch <> ' ';
+	IF	k^:[1] = ':'
+	THEN	File[0]:[1] := ch + (1 - 'A'), incK, nextCh
+	ENDIF;
+	i := @File + 1, h := 8, hh := FALSE;
+	WHILE ch <> cr DO
+		IF	ch = '.'
+		THEN	i := @File + 9, hh := TRUE, h := 3
+		ELSIF	h >> 0
+		THEN	i^:[1] := ch, incI, decH
+		ENDIF;
+		nextCh
+	ENDWHILE;
+	bufferValid := FALSE
+	END createFCB;
+
+PROCEDURE checkMemory;
+	BYTE h;
+
+	BEGIN
+	dummy := @h - safetyMargin;
+	IF	checkMode = full
+	THEN	IF	heap >> dummy
+		THEN	noMemory
+		ENDIF
+	ELSE	IF	heap + safetyMargin >> endTheorem
+		THEN	noMemory
+		ELSIF	endp >> dummy
+		THEN	errorMessage := @ttooComplex, RESTAR
+		ENDIF
+	ENDIF
+	END checkMemory;
+
+PROCEDURE putVariable(WORD number, value);
+	BEGIN
+	varVal[2 * number[1]:[1]]^[2 * number[0]:[1]] := value
+	END putVariable;
+
+PROCEDURE getVariable(WORD number, valuep);
+	BEGIN
+	valuep^ := varVal[2 * number[1]:[1]]^[2 * number[0]:[1]]
+	END getVariable;
+
+PROCEDURE Read(WORD chp);
+	BEGIN
+	REPEAT
+		BusyRead(chp)
+	UNTIL	chp^:[1] >> 0
+	END Read;
+
+PROCEDURE break;
+	BEGIN
+	IF	answer >> 0
+	THEN	CAP(@answer);
+		IF	(answer = ctrlC) OR (answer = esc)
+		THEN	errorMessage := @tbreak, RESTAR
+		ELSIF	answer = 'T'
+		THEN	setTrace, answer := 0
+		ELSIF	answer = 'N'
+		THEN	resetTrace, answer := 0
+		ENDIF
+	ENDIF
+	END break;
+
+PROCEDURE testScroll;
+	BEGIN
+	BusyRead(@answer), break;
+	IF	answer >> 0
+	THEN	outCharacter('%'), Read(@answer), outString(@tdelete), break
+	ENDIF
+	END testScroll;
+
+PROCEDURE getAnswer;
+	BEGIN
+	outString(@tyn), Read(@answer), CAP(@answer);
+	IF	(answer = 'Y') OR (answer = 'J')
+	THEN	outString(@tyes), shouldContinue := TRUE
+	ELSE	outString(@tno), shouldContinue := FALSE
+	ENDIF
+	END getAnswer;
+
+PROCEDURE readCh;
+	BEGIN
+	IF	bufferPointer = @buffer + recordSize
+	THEN	setDMA;
+		IF	BDOS(read_sequential, @File) <> 0
+		THEN	buffer[0] := eof
+		ENDIF
+	ENDIF;
+	ch := bufferPointer^:[1], incBufferPointer
+	END readCh;
+
+PROCEDURE incBufferp;
+	BEGIN
+	bufferp := bufferp + 1
+	END incBufferp;
+
+PROCEDURE getCh;
+	BEGIN
+	ch := bufferp^:[1], incBufferp
+	END getCh;
+
+PROCEDURE initSym;
+	BEGIN
+	strp := heap + (chars - 1), heap^[firstAxiom] := NIL, hash := 0
+	END initSym;
+
+PROCEDURE appendCh;
+	BEGIN
+	strp := strp + 1, strp^:[1] := ch, hash := hash + ch
+	END appendCh;
+
+PROCEDURE getHash;
+	BEGIN
+	hh := @names[2 * (hash AND (hashSize - 1))], h := hh^
+	END getHash;
+
+PROCEDURE makeHash;
+	BEGIN
+	strp^:[1] := strp^:[1] + 128, getHash
+	END makeHash;
+
+PROCEDURE searchName;
+	BEGIN
+	LOOP	IF	h = NIL
+		THEN	heap^[next] := hh^, hh^ := heap, symValue := heap, heap := strp + 1;
+			EXIT
+		ENDIF;
+		p1 := @h^[chars], p2 := @heap^[chars];
+		WHILE (p1^:[1] = p2^:[1]) AND (p1^:[1] << 128) DO
+			p1 := p1 + 1, p2 := p2 + 1
+		ENDWHILE;
+		IF	p1^:[1] = p2^:[1]
+		THEN	symValue := h, EXIT
+		ELSE	nextH
+		ENDIF
+	ENDLOOP
+	END searchName;
+
+PROCEDURE lookUp;
+	BEGIN
+	makeHash, searchName
+	END lookUp;
+
+PROCEDURE skipChar;
+	BEGIN
+	REPEAT
+		appendCh, getCh
+	UNTIL	((ch << 'a') OR (ch >> 'z')) AND ((ch << 'A') OR (ch >> 'Z')) AND
+		((ch << '0') OR (ch >> '9')) AND (ch <> '_');
+	lookUp, checkMemory
+	END skipChar;
+
+PROCEDURE error(WORD number);
+	BEGIN
+	IF	errorMessage = 0
+	THEN	errorMessage := number
+	ENDIF;
+	sym := otherSym
+	END error;
+
+PROCEDURE getSym;
+	LABEL finis;
+	BEGIN
+	sym := otherSym;
+	IF	errorMessage = 0
+	THEN	WHILE (ch = ' ') OR (ch = cr) DO
+			getCh
+		ENDWHILE;
+		sym := charSymTable[ch - eof]:[1];
+		CASE sym OF
+		ifSym:	getCh;
+			IF	ch = '-'
+			THEN	getCh
+			ELSE	sym := otherSym
+			ENDIF
+			END
+		identSym:
+			IF	ch = "'"
+			THEN	sym := otherSym, initSym;
+				LOOP
+					getCh;
+					IF	ch = "'"
+					THEN	getCh;
+						IF	ch = "'"
+						THEN	appendCh
+						ELSE	EXIT
+						ENDIF
+					ELSIF	(ch = eof) OR (ch = cr)
+					THEN	error(@terr11), GOTO finis
+					ELSE	appendCh
+					ENDIF
+				ENDLOOP;
+				IF	strp >> heap + (chars - 1)
+				THEN	sym := identSym , lookUp, checkMemory
+				ENDIF
+			ELSE	initSym, skipChar
+			ENDIF
+			END
+		varSym:	IF	ch = '_'
+			THEN	symValue := anonymousName, getCh
+			ELSE	initSym, skipChar
+			ENDIF
+			END
+		numberSym:
+			sym := otherSym, minusFlag := FALSE;
+			IF	ch = '+'
+			THEN	getCh
+			ELSIF	ch = '-'
+			THEN	minusFlag := TRUE, getCh
+			ENDIF;
+			symValue := 0;
+			WHILE	(ch >>= '0') AND (ch <<= '9') DO
+				sym := numberSym;
+				symValue := 10 * symValue + (ch + (-'0')), getCh
+			ENDWHILE;
+			IF	minusFlag <> FALSE
+			THEN	symValue := -symValue
+			ENDIF
+			END
+		ELSE	{ dotSym, commaSym, cutSym, barSym, leftRndBrk, rightRndBrk,
+			leftSqrBrk, rightSqrBrk, otherSym: }
+			getCh
+		ENDCASE
+	ENDIF;
+	finis:
+	END getSym;
+
+PROCEDURE resetVars;
+	BEGIN
+	WHILE varp[number] >> 0 DO
+		varp[number] := varp[number] - 1;
+		IF	varp[number] << maxVar
+		THEN	IF	varp[2 * (varp[number] + 1)] <> anonymousName
+			THEN	varp[2 * (varp[number] + 1)]^[firstAxiom] := firstAxioms[2 * varp[number]]
+			ENDIF
+		ENDIF
+	ENDWHILE
+	END resetVars;
+
+PROCEDURE createType(WORD typ);
+	BEGIN
+	endTheorem^[type]:[1] := typ:[1], endTheorem := endTheorem - 1
+	END createType;
+
+PROCEDURE termList;
+	BEGIN
+	term;
+	WHILE sym = commaSym DO
+		getSym, term
+	ENDWHILE;
+	createType(bracket)
+	END termList;
+
+PROCEDURE createNode(WORD typ, val);
+	BEGIN
+	endTheorem^[type]:[1] := typ:[1], endTheorem^[value] := val;
+	endTheorem := endTheorem - down
+	END createNode;
+
+PROCEDURE term;
+	BEGIN
+	checkMemory;
+	CASE sym OF
+	identSym:
+		getSym;
+		IF	sym = leftRndBrk
+		THEN	createNode(predicate, symValue), getSym, termList;
+			IF	sym = rightRndBrk
+			THEN	getSym
+			ELSE	error(@terr10)
+			ENDIF
+		ELSE	createNode(atom, symValue)
+		ENDIF
+		END
+	varSym:	createNode(variable, symValue), getSym
+		END
+	numberSym:
+		createNode(cardinal, symValue), getSym
+		END
+	leftSqrBrk:
+		getSym;
+		IF	sym = rightSqrBrk
+		THEN	createType(nilDot)
+		ELSE	LOOP
+				createType(dot), term;
+				IF	sym = commaSym
+				THEN	getSym
+				ELSE	EXIT
+				ENDIF
+			ENDLOOP;
+			IF	sym = barSym
+			THEN	getSym, term
+			ELSE	createType(nilDot)
+			ENDIF
+		ENDIF;
+		IF	sym = rightSqrBrk
+		THEN	getSym
+		ELSE	error(@terr9)
+		ENDIF
+		END
+	cutSym:	createNode(cut, NIL), getSym
+		END
+	ELSE	error(@terr8)
+	ENDCASE
+	END term;
+
+PROCEDURE allocate(WORD ap, size);
+	BEGIN
+	ap^ := heap, heap := heap + size, checkMemory
+	END allocate;
+
+PROCEDURE allocH4;
+	BEGIN
+	allocate(@h, 4)
+	END allocH4;
+
+PROCEDURE clear;
+	BEGIN
+	CLEAR2(heap - 512, 512)
+	END clear;
+
+PROCEDURE checkVariables;
+	BEGIN
+	dummy := varCounter, varCounter := varCounter + varp[number];
+	IF	varCounter[1]:[1] >> dummy[1]:[1]
+	THEN	allocate(@varVal[2 * varCounter[1]:[1]], 512), clear
+	ENDIF;
+	resetVars
+	END checkVariables;
+
+PROCEDURE saveStatus;
+	BEGIN
+	oldHeap := heap, oldNames := names
+	END saveStatus;
+
+PROCEDURE restoreStatus;
+	BEGIN
+	heap := oldHeap, names := oldNames
+	END restoreStatus;
+
+PROCEDURE assertz;
+	PROCEDURE setNil;
+		BEGIN
+		h^[next] := NIL
+		END setNil;
+
+	PROCEDURE newHead(WORD adr);
+		BEGIN
+		allocate(@lastAxiom, 4), lastAxiom^[listValue] := theorem;
+		theorem^[value]^[firstAxiom] := lastAxiom, allocH4;
+		h^[listValue] := lastAxiom, setNil;
+		lastAxiom^[next] := NIL, adr^ := h, lastHead := h
+		END newHead;
+
+	PROCEDURE insertAtLastAxiom;
+		BEGIN
+		allocH4, setNil, h^[listValue] := theorem;
+		theorem^[value]^[firstAxiom] := lastAxiom^[listValue]^[value]^[firstAxiom];
+		lastAxiom^[next] := h, lastAxiom := h
+		END insertAtLastAxiom;
+
+	BEGIN { assertz }
+	h := theorem^[value]^[firstAxiom];
+	IF	(h <<= limit) AND (h <> NIL)
+	THEN	error(@terr12)
+	ELSIF	dataBase = NIL
+	THEN	newHead(@dataBase)
+	ELSIF	lastAxiom^[listValue]^[value] = theorem^[value]
+	THEN	insertAtLastAxiom
+	ELSE	lastAxiom := h;
+		IF	lastAxiom = NIL
+		THEN	newHead(@lastHead^[next])
+		ELSE	WHILE lastAxiom^[next] <> NIL DO
+				lastAxiom := lastAxiom^[next]
+			ENDWHILE;
+			insertAtLastAxiom
+		ENDIF
+	ENDIF
+	END assertz;
+
+PROCEDURE getValue(WORD valp, theorem);
+	BEGIN
+	IF	evaluate <> FALSE
+	THEN	LOOP
+			IF	theorem^[type]:[1] <> variable
+			THEN	EXIT
+			ENDIF;
+			getVariable(theorem^[value], @hh);
+			IF	hh = NIL
+			THEN	EXIT
+			ENDIF;
+			theorem := hh
+		ENDLOOP
+	ENDIF;
+	valp^ := theorem
+	END getValue;
+
+PROCEDURE outQuote;
+	BEGIN
+	IF	printQuotes <> FALSE
+	THEN	outCharacter("'")
+	ENDIF
+	END outQuote;
+
+PROCEDURE checkQuotes;
+	BEGIN
+	printQuotes := FALSE;
+	IF	setQuotes <> FALSE
+	THEN	i := h + 1, answer := i^:[1] AND 7FH;
+		IF	(answer >>= 'a') AND (answer <<= 'z')
+		THEN	LOOP
+				answer := i^:[1] AND 7FH, CAP(@answer);
+				IF	((answer << 'A') OR (answer >> 'Z')) AND
+					((answer << '0') OR (answer >> '9')) AND (answer <> '_')
+				THEN	setPrintQuotes, EXIT
+				ENDIF;
+				IF	i^:[1] >>= 128
+				THEN	EXIT
+				ENDIF;
+				incI
+			ENDLOOP
+		ELSE	setPrintQuotes
+		ENDIF;
+		outQuote
+	ENDIF
+	END checkQuotes;
+
+PROCEDURE printName(WORD name);
+	BEGIN
+	IF	name = anonymousName
+	THEN	outCharacter('_')
+	ELSE	h := name + (chars - 1), checkQuotes;
+		REPEAT
+			incH, i := h^:[1] AND 7FH, outCharacter(i);
+			IF	i = "'"
+			THEN	outQuote
+			ENDIF
+		UNTIL	h^:[1] >>= 128;
+		outQuote
+	ENDIF
+	END printName;
+
+PROCEDURE getNext(WORD destinationp, source);
+	BEGIN
+	n := source, NEXTN, destinationp^ := n
+	END getNext;
+
+PROCEDURE showList(WORD struct);
+	BEGIN
+	listLevel := listLevel + 1;
+	LOOP
+		IF	(evaluate = FALSE) AND (listLevel = 1) AND (struct^[type]:[1] <> cut)
+		THEN	newLine, spaces(2)
+		ENDIF;
+		show(struct), getNext(@struct, struct);
+		IF	struct^[type]:[1] = bracket
+		THEN	EXIT
+		ELSE	outComma
+		ENDIF
+	ENDLOOP;
+	listLevel := listLevel - 1
+	END showList;
+
+PROCEDURE show(WORD struct);
+	BYTE first;
+
+	BEGIN
+	checkMemory, getValue(@struct, struct), minusFlag := struct^[value];
+	CASE struct^[type]:[1] OF
+	nilDot:	outString(@temptyList)
+		END
+	dot:	outCharacter('[');
+		LOOP
+			struct := struct - 1, show(struct), getNext(@struct, struct);
+			getValue(@struct, struct);
+			IF	struct^[type]:[1] = dot
+			THEN	outComma
+			ELSE	IF	struct^[type]:[1] <> nilDot
+			THEN	outCharacter('|'), show(struct)
+			ENDIF;
+			EXIT
+			ENDIF
+		ENDLOOP;
+		outCharacter(']')
+		END
+	predicate:
+		printName(minusFlag), outCharacter('(');
+		showList(struct - down), outCharacter(')')
+		END
+	variable:
+		IF	evaluate = FALSE
+		THEN	first := setQuotes, setQuotes := FALSE;
+			printName(minusFlag), setQuotes := first
+		ELSIF	minusFlag <<= queryVarp[number]
+		THEN	first := setQuotes, setQuotes := FALSE;
+			printName(queryVarp[2 * minusFlag]);
+			setQuotes := first
+		ELSE	outCharacter('_'), outCardinal(minusFlag)
+		ENDIF
+		END
+	cardinal:
+		outInteger(minusFlag)
+		END
+	cut:	outCharacter('!')
+		END
+	atom:	printName(minusFlag)
+		END
+	ENDCASE
+	END show;
+
+PROCEDURE dumpDataBase;
+	BEGIN
+	p1 := dataBase, evaluate := FALSE, setQuotes := TRUE;
+	WHILE p1 <> NIL DO
+		p2 := p1^[listValue];
+		WHILE p2 <> NIL DO
+			listLevel := 1, show(p2^[listValue]);
+			n := p2^[listValue], NEXTN;
+			IF	n^[type]:[1] <> bracket
+			THEN	outString(@tif), listLevel := 0, showList(n)
+			ENDIF;
+			outCharacter('.'), newLine, p2 := p2^[next]
+		ENDWHILE;
+		newLine, p1 := p1^[next]
+	ENDWHILE;
+	evaluate := TRUE, setQuotes := FALSE
+	END dumpDataBase;
+
+PROCEDURE gotoXY(WORD x,y);
+	PROCEDURE sendNumber(WORD x);
+		BEGIN
+		IF	ascur = 0
+		THEN	outCharacter(x:[1])
+		ELSE	IF	ascur = 3
+			THEN	outCharacter('0')
+			ENDIF;
+			outCharacter(x:[1] DIV 10 + '0');
+			outCharacter(x:[1] MOD 10 + '0')
+		ENDIF
+		END sendNumber;
+
+	PROCEDURE sendClead2;
+		BEGIN
+		terminalString(@clead2)
+		END sendClead2;
+
+	BEGIN { gotoXY }
+	terminalString(@clead1);
+	IF	cb4lfg >> 0
+	THEN	sendNumber(x:[1] + coloff), sendClead2, sendNumber(y:[1] + linoff)
+	ELSE	sendNumber(y:[1] + linoff), sendClead2, sendNumber(x:[1] + coloff)
+	ENDIF;
+	terminalString(@ctrail)
+	END gotoXY;
+
+PROCEDURE goto2;
+	BEGIN
+	gotoXY(column, line)
+	END goto2;
+
+PROCEDURE home;
+	BEGIN
+	gotoXY(0, 0)
+	END home;
+
+PROCEDURE clearToEndOfLine;
+	BEGIN
+	terminalString(@eraeol)
+	END clearToEndOfLine;
+
+PROCEDURE incLine;
+	BEGIN
+	line := line + 1
+	END incLine;
+
+PROCEDURE decBufferp;
+	BEGIN
+	bufferp := bufferp - 1
+	END decBufferp;
+
+PROCEDURE incColumn;
+	BEGIN
+	column := column + 1
+	END incColumn;
+
+PROCEDURE gotoStatus;
+	BEGIN
+	gotoXY(0, maxLine1)
+	END gotoStatus;
+
+PROCEDURE statusLine;
+	BEGIN
+	gotoStatus, clearToEndOfLine;
+	IF	errorMessage >> 0
+	THEN	outString(errorMessage)
+	ENDIF;
+	IF	restMessage >> 0
+	THEN	outString(restMessage)
+	ENDIF;
+	gotoXY(60, maxLine1), outString(@tInsert);
+	outString(@tOff + insertFlag * (@tOn - @tOff))
+	END statusLine;
+
+PROCEDURE outLine;
+	BEGIN
+	WHILE h^:[1] <> cr DO
+		incK;
+		IF	k << maxColumn
+		THEN	outCharacter(h^:[1])
+		ENDIF;
+		incH
+	ENDWHILE;
+	incH, clearToEndOfLine
+	END outLine;
+
+PROCEDURE clearLines;
+	BEGIN
+	WHILE i << maxLine1 DO
+		newLine, clearToEndOfLine, incI
+	ENDWHILE;
+	END clearLines;
+
+PROCEDURE setUpScreen;
+	BEGIN
+	i := line;
+	LOOP
+		incI, k := 0, outLine;
+		IF	(i = maxLine1) OR (h >> endp)
+		THEN	EXIT
+		ENDIF;
+		newLine
+	ENDLOOP;
+	clearLines, statusLine
+	END setUpScreen;
+
+PROCEDURE forwardCr;
+	BEGIN
+	WHILE h^:[1] <> cr DO
+		incH
+	ENDWHILE;
+	incH
+	END forwardCr;
+
+PROCEDURE nextLine;
+	BEGIN
+	h := bufferp, forwardCr
+	END nextLine;
+
+PROCEDURE backwardCr;
+	BEGIN
+	REPEAT
+		decH
+	UNTIL	h^:[1] = cr;
+	incH
+	END backwardCr;
+
+PROCEDURE thisLine;
+	BEGIN
+	h := bufferp, backwardCr
+	END thisLine;
+
+PROCEDURE getLineLength;
+	BEGIN
+	nextLine, lineLength := h, thisLine, lineLength := lineLength - h-1
+	END getLineLength;
+
+PROCEDURE adjustColumn;
+	BEGIN
+	bufferp := h, getLineLength;
+	IF	column >> lineLength
+	THEN	column := lineLength
+	ENDIF;
+	bufferp := bufferp + column
+	END adjustColumn;
+
+PROCEDURE downCursor;
+	BEGIN
+	nextLine;
+	IF	line = maxLine1 - 1
+	THEN	gotoXY(0, maxLine1), hh := h, k := 0, outLine, h := hh, outCharacter(lf);
+		statusLine
+	ELSE	incLine
+	ENDIF
+	END downCursor;
+
+PROCEDURE upCursor;
+	BEGIN
+	thisLine, decH, backwardCr;
+	IF	line = 0
+	THEN	home, hh := h, setUpScreen, h := hh
+	ELSE	line := line - 1
+	ENDIF
+	END upCursor;
+
+PROCEDURE delete;
+	BEGIN
+	MOVE(bufferp + delta, endp, bufferp), endp := endp - delta, h := bufferp;
+	changeFlag := TRUE
+	END delete;
+
+PROCEDURE leftCursor;
+	BEGIN
+	IF	column = 0
+	THEN	upCursor, decBufferp, getLineLength, column := lineLength
+	ELSE	column := column - 1, decBufferp
+	ENDIF
+	END leftCursor;
+
+PROCEDURE deleteCharacter;
+	BEGIN
+	delta := 1;
+	IF	bufferp^:[1] = cr
+	THEN	nextLine, hh := h, forwardCr;
+		IF	lineLength + (h - hh) <<= maxColumn
+		THEN	delete, setUpScreen
+		ENDIF
+	ELSE	delete, k := column, outLine
+	ENDIF
+	END deleteCharacter;
+
+PROCEDURE newPage;
+	BEGIN
+	bufferp := h, home, oldLine := line, line := 0, setUpScreen;
+	LOOP
+		nextLine;
+		IF	(h >> endp) OR (line = oldLine)
+		THEN	EXIT
+		ENDIF;
+		bufferp := h, incLine
+	ENDLOOP;
+	h := bufferp, adjustColumn
+	END newPage;
+
+PROCEDURE backCursor;
+	BEGIN
+	REPEAT
+		backwardCr, i := i - 1, decH
+	UNTIL	(i = -1) OR (h << startp);
+	incH
+	END backCursor;
+
+PROCEDURE deleteFunction;
+	BEGIN
+	IF	bufferp >> startp
+	THEN	leftCursor, goto2, deleteCharacter
+	ENDIF
+	END deleteFunction;
+
+PROCEDURE edit;
+	LABEL finis;
+	BEGIN
+	IF	bufferp >> endp
+	THEN	bufferp := endp
+	ENDIF;
+	thisLine, column := bufferp - h, i := 12, backCursor, delta := 11 - i, home;
+	line := 0, setUpScreen, ctrlBFlag := FALSE, changeFlag := FALSE, line := delta;
+	LOOP
+		IF	column >>= maxColumn
+		THEN	bufferp := bufferp - column + (maxColumn - 1);
+			column := maxColumn - 1
+		ENDIF;
+		goto2, Read(@char), getLineLength;
+		IF	char = ctrlB
+		THEN	thisLine, bufferp := h;
+			IF	ctrlBFlag = FALSE
+			THEN	column := 0
+			ELSE	column := lineLength
+			ENDIF;
+			bufferp := bufferp + column, ctrlBFlag := TRUE - ctrlBFlag
+		ELSE	ctrlBFlag := FALSE;
+			IF	char = ctrlN
+			THEN	char := cr
+			ENDIF;
+			CASE char OF
+			ctrlL:	endp := bufferp, endp^:[1] := cr, changeFlag := TRUE;
+				clearToEndOfLine, i := line + 1, clearLines
+				END
+			ctrlD:	IF	bufferp << endp
+				THEN	IF	bufferp^:[1] = cr
+					THEN	downCursor, column := 0
+					ELSE	incColumn
+					ENDIF;
+					incBufferp
+				ENDIF
+				END
+			ctrlX:	nextLine;
+				IF	h <<= endp
+				THEN	downCursor, adjustColumn
+				ENDIF
+				END
+			ctrlS:	IF	bufferp >> startp
+				THEN	leftCursor
+				ENDIF
+				END
+			ctrlE:	thisLine;
+				IF	h >> startp
+				THEN	upCursor, adjustColumn
+				ENDIF
+				END
+			ctrlC:	i := line;
+				REPEAT
+					forwardCr, incI
+				UNTIL	(i = maxLine1) OR (h >> endp);
+				IF	h << endp
+				THEN	newPage
+				ENDIF
+				END
+			ctrlR:	i := line + (maxLine1), thisLine, backCursor;
+				IF	h >>= startp
+				THEN	newPage
+				ENDIF
+				END
+			ctrlO, ctrlV:
+				insertFlag := TRUE - insertFlag, statusLine
+				END
+			ctrlG:	IF	bufferp << endp
+				THEN	deleteCharacter
+				ENDIF
+				END
+			ctrlY:	thisLine;
+				IF	h << endp
+				THEN	IF	h + lineLength = endp
+					THEN	delta := lineLength
+					ELSE	delta := lineLength + 1
+					ENDIF;
+					bufferp := h, delete;
+					outCharacter(cr), adjustColumn, setUpScreen
+				ENDIF
+				END
+			ctrlK:	IF	bufferp << endp
+				THEN	delta := lineLength - column, delete,
+					clearToEndOfLine
+				ENDIF
+				END
+			bs:	deleteFunction
+				END
+			esc:	EXIT
+				END
+			ELSE	IF	char = del
+				THEN	deleteFunction
+				ELSIF	(lineLength << maxColumn - 1) AND (char >>= 32) AND (
+					char <<= 126) OR (char = cr)
+				THEN	IF	(insertFlag <> FALSE) OR (column = lineLength)
+						OR (char = cr)
+					THEN	IF	endp << bufferLimit
+						THEN	MOVE(bufferp, endp, bufferp + 1)
+						ELSE	GOTO finis
+						ENDIF;
+						endp := endp + 1
+					ENDIF;
+					changeFlag := TRUE, h := bufferp, bufferp^:[1] := char;
+					IF	char = cr
+					THEN	clearToEndOfLine;
+						IF	line << maxLine1 - 1
+						THEN	downCursor, newLine, h := bufferp + 1;
+							setUpScreen
+						ELSE	downCursor
+						ENDIF;
+						column := 0
+					ELSE	incColumn;
+						IF	insertFlag = FALSE
+						THEN	outCharacter(char)
+						ELSE	k := 0, outLine
+						ENDIF
+					ENDIF;
+					incBufferp;
+					finis:
+				ENDIF
+			ENDCASE
+		ENDIF
+	ENDLOOP;
+	gotoXY(0,maxLine1), clearToEndOfLine, endp^[1]:[1] := eof
+	END edit;
+
+PROCEDURE decN;
+	BEGIN
+	n := n - 1
+	END decN;
+
+PROCEDURE decNbyDown;
+	BEGIN
+	n := n - down
+	END decNbyDown;
+
+PROCEDURE traverseOne;
+	BEGIN
+	checkMemory;
+	CASE n^[type]:[1] OF
+	predicate:
+		decNbyDown, traverse, decN
+		END
+	atom, cardinal:
+		decNbyDown
+		END
+	cut:	n^[value] := scope, decNbyDown
+		END
+	dot:	decN, traverseOne, traverseOne
+		END
+	nilDot:	decN
+		END
+	variable:
+		dummy := n^[value]^[firstAxiom];
+		IF	(n^[value] = anonymousName) OR (dummy = 0) OR (dummy >> maxVar)
+		THEN	varp[number] := varp[number] + 1;
+			IF	varp[number] <<= maxVar
+			THEN	varp[2 * varp[number]] := n^[value]
+			ELSE	outString(@terr1), printName(rule^[value]);
+				nlNlSetAsk, RESTAR
+			ENDIF;
+			IF	n^[value] <> anonymousName
+			THEN	firstAxioms[2 * (varp[number] - 1)] := dummy;
+				n^[value]^[firstAxiom] := varp[number]
+			ENDIF;
+			dummy := varp[number]
+		ENDIF;
+		n^[value] := dummy + varCounter, decNbyDown
+		END
+	ENDCASE
+	END traverseOne;
+
+PROCEDURE traverse;
+	BEGIN
+	REPEAT
+		traverseOne
+	UNTIL	n^[type]:[1] = bracket
+	END traverse;
+
+PROCEDURE copyList(WORD source);
+	BEGIN
+	n := source, h := n, LASTN, allocate(@rule, h - n + 1), MOVE(n, h, rule);
+	n := heap - 1, rule := n, traverse
+	END copyList;
+
+PROCEDURE contains(WORD location);
+	BEGIN
+	checkMemory, getValue(@h, location);
+	IF	h^[type]:[1] = predicate
+	THEN	location := h - down;
+		REPEAT
+			contains(location), getNext(@location, location)
+		UNTIL	(location^[type]:[1] = bracket) OR (success = FALSE)
+	ELSIF	(h^[type]:[1] = variable) AND (h^[value] = what)
+	THEN	noSuccess
+	ENDIF
+	END contains;
+
+PROCEDURE printSolution;
+	BEGIN
+	newLine, k := 0;
+	WHILE k <<= queryVarp[number] DO
+		getVariable(k, @j);
+		IF	j <> NIL
+		THEN	printName(queryVarp[2 * k]), outCharacter('=');
+			getValue(@j, j), show(j), newLine
+		ENDIF;
+		incK
+	ENDWHILE;
+	outString(@tcontinue), getAnswer;
+	IF	shouldContinue = FALSE
+	THEN	askStatus := successQuestion, RESTAR
+	ENDIF
+	END printSolution;
+
+PROCEDURE replace(WORD theorem, val);
+	BEGIN
+	allocH4, h^[next] := actListp^, actListp^ := h;
+	h^[listValue] := theorem^[value], putVariable(theorem^[value], val)
+	END replace;
+
+PROCEDURE mark(WORD statusp);
+	BEGIN
+	heap^[varCounterSave] := varCounter, heap^[replacementList] := NIL;
+	statusp^ := heap, heap := heap + 4, checkMemory
+	END mark;
+
+PROCEDURE release(WORD status);
+	BEGIN
+	heap := status;
+	varCounter := heap^[varCounterSave], h := heap^[replacementList];
+	WHILE h <> NIL DO
+		putVariable(h^[listValue], NIL), nextH
+	ENDWHILE
+	END release;
+
+PROCEDURE unify(WORD theorem, rule);
+	LABEL loop2;
+
+	BEGIN
+	checkMemory;
+	loop2:	getValue(@theorem, theorem), getValue(@rule, rule);
+	IF	theorem^[type]:[1] = variable
+	THEN	IF	rule^[type]:[1] = variable
+		THEN	IF	rule^[value] <> theorem^[value]
+			THEN	replace(theorem, rule)
+			ENDIF
+		ELSE	what := theorem^[value], contains(rule);
+			IF	success <> FALSE
+			THEN	replace(theorem, rule)
+			ENDIF
+		ENDIF
+	ELSIF	rule^[type]:[1] = variable
+	THEN	what := rule^[value], contains(theorem);
+		IF	success <> FALSE
+		THEN	replace(rule, theorem)
+		ENDIF
+	ELSIF	rule^[type]:[1] = theorem^[type]:[1]
+	THEN	CASE rule^[type]:[1] OF
+		dot:	theorem := theorem - 1, rule := rule - 1;
+			unify(theorem, rule);
+			IF	success <> FALSE
+			THEN	getNext(@rule, rule), getNext(@theorem, theorem);
+			GOTO loop2 { tail recursion }
+			ENDIF
+			END
+		predicate, atom, cardinal:
+			IF	rule^[value] = theorem^[value]
+			THEN	IF	rule^[type]:[1] = predicate
+			THEN	theorem := theorem - down, rule := rule - down;
+				REPEAT
+					unify(theorem, rule);
+					getNext(@rule, rule);
+					getNext(@theorem, theorem)
+				UNTIL	(rule^[type]:[1] = bracket) OR
+					(theorem^[type]:[1] = bracket) OR (success = FALSE);
+				IF	(theorem^[type]:[1] <> bracket) OR (rule^[
+					type]:[1] <> bracket)
+				THEN	noSuccess
+				ENDIF
+			ENDIF
+			ELSE	noSuccess
+			ENDIF
+			END
+		ENDCASE
+	ELSE	noSuccess
+	ENDIF
+	END unify;
+
+PROCEDURE closeFile;
+	BEGIN
+	IF	openedFile <> FALSE
+	THEN	openedFile := FALSE, close
+	ENDIF
+	END closeFile;
+
+PROCEDURE downMove;
+	BEGIN
+	MOVE(endTheorem, theorem, heap);
+	heap := heap + (theorem - endTheorem + 1), theorem := heap - 1
+	END downMove;
+
+PROCEDURE callProc(WORD function);
+	LABEL finis;
+
+	PROCEDURE makeNode;
+		BEGIN
+		allocate(@dummy, 3), endTheorem := heap - 1, h := endTheorem
+		END makeNode;
+
+	PROCEDURE checkEnd;
+		BEGIN
+		IF	heap + safetyMargin >> endTheorem
+		THEN	noMemory
+		ENDIF
+		END checkEnd;
+
+	PROCEDURE setUpEnd;
+		BYTE stack;
+
+		BEGIN
+		endTheorem := @stack - safetyMargin, theorem := endTheorem, checkEnd
+		END setUpEnd;
+
+	PROCEDURE nextItem;
+		BEGIN
+		h := n, NEXTN, dummy := endTheorem, endTheorem := endTheorem - (h - n);
+		checkEnd, MOVE(n + 1, h, endTheorem + 1)
+		END nextItem;
+
+	PROCEDURE getValueN;
+		BEGIN
+		getValue(@n, n)
+		END getValueN;
+
+	BEGIN { callProc }
+	n := actTheorem, parNumber := 0;
+	IF	n^[type]:[1] = predicate
+	THEN	decNbyDown;
+		REPEAT
+			IF	parNumber >> maxPar
+			THEN	noSuccess, GOTO finis
+			ENDIF;
+			getValue(@parValue[2 * parNumber], n);
+			parType[2 * parNumber] := parValue[2 * parNumber]^[type]:[1];
+			parVal[2 * parNumber] := parValue[2 * parNumber]^[value];
+			parNumber := parNumber + 1, NEXTN
+		UNTIL	n^[type]:[1] = bracket
+	ENDIF;
+	CASE function:[1] OF
+	get0:	IF	parNumber = 1
+		THEN	Read(@i), makeNode, createNode(cardinal, i);
+			unify(h, parValue[0])
+		ELSE	noSuccess
+		ENDIF
+		END
+	name:	IF	parNumber = 2
+		THEN	IF	parType[0] = atom
+			THEN	setUpEnd, i := parVal[0] + chars;
+				LOOP
+					createType(dot), j := i^:[1];
+					createNode(cardinal, j AND 7FH), checkEnd;
+					IF	j >>= 128
+					THEN	EXIT
+					ENDIF;
+					incI
+				ENDLOOP;
+				createType(nilDot), downMove, unify(theorem, parValue[2])
+			ELSIF	parType[2] = dot
+			THEN	n := parValue[2], initSym;
+				LOOP
+					decN, getValue(@j, n);
+					IF	j^[type]:[1] <> cardinal
+					THEN	noSuccess, GOTO finis
+					ENDIF;
+					ch := j^[value]:[1] AND 7FH;
+					IF	(ch << ' ') OR (ch >>= 127)
+					THEN	ch := '#'
+					ENDIF;
+					appendCh;
+					IF	strp + safetyMargin >> @function
+					THEN	noMemory
+					ENDIF;
+					NEXTN, getValueN;
+					IF	n^[type]:[1] = nilDot
+					THEN	EXIT
+					ENDIF;
+					IF	n^[type]:[1] <> dot
+					THEN	noSuccess, GOTO finis
+					ENDIF
+				ENDLOOP;
+				makeHash, i := heap, k := @nameList;
+				WHILE k^[next] <> NIL DO
+					nextK
+				ENDWHILE;
+				k^[next] := h, hh := @nameList, h := nameList, searchName;
+				IF	(heap >> i) AND (k = @nameList)
+				THEN	nameList^[next] := NIL
+				ELSE	k^[next] := NIL
+				ENDIF;
+				makeNode, createNode(atom, symValue);
+				unify(h, parValue[0])
+			ELSE	noSuccess
+			ENDIF
+		ELSE	noSuccess
+		ENDIF
+		END
+	getclause:
+		k := parVal[0]^[firstAxiom];
+		IF	(parNumber = 3) AND (parType[0] = atom) AND (k >> limit) AND (
+			parType[2] = cardinal)
+		THEN	i := parVal[2];
+			WHILE (i > 1) AND (k <> NIL) DO
+				nextK, i := i - 1
+			ENDWHILE;
+			IF	k = NIL
+			THEN	noSuccess, GOTO finis
+			ENDIF;
+			copyList(k^[listValue]), makeNode;
+			createNode(predicate, parVal[0]), checkVariables;
+			unify(parValue[4], h)
+		ELSE	noSuccess
+		ENDIF
+		END
+	numclause:
+		k := parVal[0]^[firstAxiom];
+		IF	(parNumber = 2) AND (parType[0] = atom) AND (k >> limit)
+		THEN	i := 0;
+			WHILE k <> NIL DO
+				nextK, incI
+			ENDWHILE;
+			makeNode;
+			createNode(cardinal, i), unify(parValue[2], h)
+		ELSE	noSuccess
+		ENDIF
+		END
+	ge:	IF	(parNumber <> 2) OR (parType[0] <> cardinal) OR
+			(parType[2] <> cardinal) OR (parVal[0] < parVal[2])
+		THEN	noSuccess
+		ENDIF
+		END
+	fail:	noSuccess
+		END
+	trace:	IF	parNumber = 0
+		THEN	setTrace
+		ELSE	noSuccess
+		ENDIF
+		END
+	notrace:
+		IF	parNumber = 0
+		THEN	resetTrace
+		ELSE	noSuccess
+		ENDIF
+		END
+	var:	IF	(parNumber <> 1) OR (parType[0] <> variable)
+		THEN	noSuccess
+		ENDIF
+		END
+	integer:
+		IF	(parNumber <> 1) OR (parType[0] <> cardinal)
+		THEN	noSuccess
+		ENDIF
+		END
+	atom2:	IF	(parNumber <> 1) OR (parType[0] <> atom)
+		THEN	noSuccess
+		ENDIF
+		END
+	chr:	IF	(parNumber = 1) AND (parType[0] = cardinal) AND (parVal[0] << 255)
+		THEN	outCharacter(parVal[0])
+		ELSE	noSuccess
+		ENDIF
+		END
+	open:	IF	(parNumber = 1) AND (parType[0] = atom)
+		THEN	closeFile, checkError, i := @buffer, k := parVal[0] + chars;
+			LOOP
+				i^:[1] := k^:[1] AND 007FH, incI;
+				IF	k^:[1] >>= 128
+				THEN	EXIT
+				ENDIF;
+				incK
+			ENDLOOP;
+			i^:[1] := cr, k := @buffer, createFCB, CreateFile, checkError;
+			openedFile := TRUE
+		ELSE	noSuccess
+		ENDIF
+		END
+	close2:	IF	parNumber = 0
+		THEN	closeFile, checkError
+		ELSE	noSuccess
+		ENDIF
+		END
+	write2:	IF	parNumber = 1
+		THEN	show(parValue[0])
+		ELSE	noSuccess
+		ENDIF
+		END
+	writeq:	IF	parNumber = 1
+		THEN	setQuotes := TRUE, show(parValue[0]), setQuotes := FALSE
+		ELSE	noSuccess
+		ENDIF
+		END
+	nl:	IF	parNumber = 0
+		THEN	newLine
+		ELSE	noSuccess
+		ENDIF
+		END
+	univ:	IF	parNumber = 2
+		THEN	IF	(parType[0] = predicate) OR (parType[0] = atom)
+			THEN	setUpEnd, createType(dot);
+				createNode(atom, parVal[0]), n := parValue[0];
+				IF	parType[0] = predicate
+				THEN	decNbyDown;
+					REPEAT
+						createType(dot), nextItem
+					UNTIL	n^[type]:[1] = bracket
+				ENDIF;
+				createType(nilDot), downMove, unify(theorem, parValue[2])
+			ELSIF	parType[2] = dot
+			THEN	n := parValue[2] - 1, getValue(@j, n);
+				IF	j^[type]:[1] = atom
+				THEN	NEXTN, getValueN, setUpEnd;
+					IF	n^[type]:[1] = nilDot
+					THEN	createNode(atom, j^[value])
+					ELSE	createNode(predicate, j^[value]);
+						WHILE n^[type]:[1] = dot DO
+							decN, nextItem, getValueN
+						ENDWHILE;
+						IF	n^[type]:[1] = nilDot
+						THEN	createType(bracket)
+						ELSE	noSuccess, GOTO finis
+						ENDIF
+					ENDIF;
+					downMove, unify(theorem, parValue[0])
+				ELSE	noSuccess
+				ENDIF
+			ELSE	noSuccess
+			ENDIF
+		ELSE	noSuccess
+		ENDIF
+		END
+	add, sub, mul, div2, mod2:
+		IF	(parNumber = 3) AND (parType[0] = cardinal) AND (parType[2] = cardinal)
+		THEN	CASE function:[1] OF
+			add:	k := parVal[0] + parVal[2]
+				END
+			sub:	k := parVal[0] - parVal[2]
+				END
+			mul:	k := parVal[0] * parVal[2]
+				END
+			div2:	k := parVal[0] / parVal[2]
+				END
+			mod2:	k := parVal[0] - parVal[2] * (parVal[0] / parVal[2])
+				END
+			ENDCASE;
+			makeNode, createNode(cardinal, k), unify(h, parValue[4])
+		ELSE	noSuccess
+		ENDIF
+		END
+	ENDCASE;
+	finis:
+	END callProc;
+
+PROCEDURE makeList;
+	BEGIN
+	h := @rule;
+	REPEAT
+		allocate(h, 4), nextH, h^[listValue] := n, h^[next] := NIL;
+		NEXTN
+	UNTIL	n^[type]:[1] = bracket
+	END makeList;
+
+PROCEDURE prove(WORD theorem, sendCutp);
+	LABEL finis, loop2;
+
+	WORD status1, status2, marker, receiveCut;
+
+	BEGIN
+	mark(@status1), sendCutp^ := NIL, level := level + 1;
+	loop2:	testScroll;
+	IF	theorem = NIL
+	THEN	printSolution, GOTO finis
+	ENDIF;
+	IF	traceFlag <> FALSE
+	THEN	newLine, outCardinal(level), outComma;
+		outCardinal(@receiveCut - heap), outCharacter(':'), p1 := theorem;
+		LOOP
+			show(p1^[listValue]), p1 := p1^[next];
+			IF	p1 = NIL
+			THEN	EXIT
+			ENDIF;
+			outComma, testScroll
+		ENDLOOP;
+		newLine
+	ENDIF;
+	getValue(@actTheorem, theorem^[listValue]);
+	IF	actTheorem^[type]:[1] = cut
+	THEN	sendCutp^ := actTheorem^[value], theorem := theorem^[next], GOTO loop2
+	ELSIF	(actTheorem^[type]:[1] = atom) OR (actTheorem^[type]:[1] = predicate)
+	THEN	marker := actTheorem^[value]^[firstAxiom];
+		IF	marker = NIL
+		THEN	outString(@tundef), printName(actTheorem^[value]);
+			nlNlSetAsk, RESTAR
+		ELSIF	marker <<= limit
+		THEN	success := TRUE, actListp := @status1^[replacementList];
+			callProc(marker);
+			IF	success <> FALSE
+			THEN	theorem := theorem^[next], GOTO loop2
+			ENDIF
+		ELSE	LOOP
+				IF	marker = NIL
+				THEN	EXIT
+				ENDIF;
+				scope := @status2, mark(scope), copyList(marker^[listValue]);
+				checkVariables, success := TRUE;
+				actListp := @status2^[replacementList];
+				unify(rule, theorem^[listValue]);
+				IF	success <> FALSE
+				THEN	n := rule, NEXTN;
+					IF	n^[type]:[1] = bracket
+					THEN	actTheorem := theorem^[next]
+					ELSE	makeList, h^[next] := theorem^[next];
+						actTheorem := rule
+					ENDIF;
+					prove(actTheorem, @receiveCut), release(status2);
+					IF	receiveCut <> NIL
+					THEN	IF	receiveCut <> @status2
+						THEN	sendCutp^ := receiveCut
+						ENDIF;
+						EXIT
+					ENDIF
+				ELSE	release(status2)
+				ENDIF;
+				marker := marker^[next]
+			ENDLOOP
+		ENDIF
+	ENDIF;
+	finis:	release(status1), level := level - 1;
+	WHILE nameList >>= heap DO
+		nameList := nameList^[next]
+	ENDWHILE
+	END prove;
+
+PROCEDURE initParser;
+	BEGIN
+	errorMessage := 0, getCh, getSym;
+	END initParser;
+
+PROCEDURE setEndTheorem;
+	BEGIN
+	theorem := startp - 1, endTheorem := theorem
+	END setEndTheorem;
+
+PROCEDURE parseDataBase;
+	BEGIN
+	setEndTheorem, initParser;
+	WHILE (sym <> eofSym) AND (errorMessage = 0) DO
+		setEndTheorem, term;
+		IF	(theorem^[type]:[1] <> predicate) AND (theorem^[type]:[1] <> atom)
+		THEN	error(@terr4)
+		ENDIF;
+		IF	sym = ifSym
+		THEN	getSym, termList;
+			IF	sym = dotSym
+			THEN	downMove, assertz, getSym
+			ELSE	error(@terr3)
+			ENDIF
+		ELSIF	sym = dotSym
+		THEN	createType(bracket), downMove, assertz, getSym
+		ELSE	error(@terr5)
+		ENDIF
+	ENDWHILE
+	END parseDataBase;
+
+PROCEDURE traceMessage;
+	BEGIN
+	outString(@tTrace), outString(@tOff + traceFlag * (@tOn - @tOff))
+	END traceMessage;
+
+PROCEDURE clearDataBase;
+	BEGIN
+	heap := LAST, CLEAR2(@names, 2 * hashSize), i := @predef;
+	WHILE i^:[1] <> 0 DO
+		initSym, heap^[firstAxiom] := i^:[1];
+		LOOP
+			incI, ch := i^:[1];
+			IF	ch <<= limit
+			THEN	EXIT
+			ENDIF;
+			appendCh
+		ENDLOOP;
+		lookUp
+	ENDWHILE;
+	dataBase := NIL
+	END clearDataBase;
+
+PROCEDURE resetSystem;
+	BYTE h;
+
+	BEGIN
+	clearDataBase, top := @h - 512, maxRecord := (top - heap) DIV recordSize;
+	resetTrace, varp[number] := 0, setQuotes := FALSE;
+	queryBuffer[0] := cr + 256 * cr, fileName[0] := cr + 256 * cr, fendp := @fileName + 1;
+	qendp := @queryBuffer + 1, qbufferp := @queryBuffer + 1, currentOutput := terminal;
+	evaluate := TRUE, insertFlag := TRUE, changeDataBase := noDataBase;
+	selection := @menu + 1, maxLine1 := maxLine - 1
+	END resetSystem;
+
+PROCEDURE testQuit;
+	BEGIN
+	outString(@texit2), getAnswer;
+	IF	shouldContinue <> FALSE
+	THEN	gotoStatus, clearToEndOfLine, terminalString(@reset), HALT
+	ENDIF
+	END testQuit;
+
+PROCEDURE main;
+
+	PROCEDURE makeFCB;
+		BEGIN
+		k := @fileName + 1, createFCB;
+		IF	hh = FALSE
+		THEN	File[9] := 'PR', File[11] := 'O'
+		ENDIF
+		END makeFCB;
+
+	PROCEDURE printError;
+		BEGIN
+		IF	errorMessage >> 0
+		THEN	newLine, outString(errorMessage), nlNlSetAsk
+		ENDIF
+		END printError;
+
+	PROCEDURE getFile;
+		BEGIN
+		errorMessage := @tfileName, startp := @fileName + 1;
+		bufferp := startp, endp := fendp;
+		bufferLimit := @fileName + fileNameSize - 2, edit, fendp := endp, makeFCB
+		END getFile;
+
+	PROCEDURE open;
+		BEGIN
+		h := BDOS(open_file, @File)
+		END open;
+
+	PROCEDURE save;
+		BEGIN
+		restMessage := @tSave, getFile, CreateFile;
+		IF	errorMessage = 0
+		THEN	checkMode := full, currentOutput := file2, dumpDataBase;
+			currentOutput := terminal, close
+		ENDIF;
+		printError;
+		IF	errorMessage = 0
+		THEN	changeDataBase := FALSE
+		ENDIF
+		END save;
+
+	PROCEDURE saveDataBase;
+		BEGIN
+		IF	dataBase = NIL
+		THEN	changeDataBase := noDataBase
+		ELSIF	changeDataBase = TRUE
+		THEN	outString(@tsave2), getAnswer;
+			IF	shouldContinue <> FALSE
+			THEN	save
+			ENDIF
+		ENDIF
+		END saveDataBase;
+
+	PROCEDURE clearScreen;
+		BEGIN
+		home, clearToEndOfLine, i := 1, clearLines, home
+		END clearScreen;
+
+	PROCEDURE exit2;
+		BEGIN
+		saveDataBase, home, clearToEndOfLine, testQuit
+		END exit2;
+
+	PROCEDURE showSelection;
+		BEGIN
+		h := selection;
+		REPEAT
+			incH
+		UNTIL	h^:[1] = ' ';
+		selection^[-1]:[1] := '<', h^:[1] := '>', gotoStatus, outString(@menu);
+		clearToEndOfLine, gotoXY(selection - @menu, maxLine1);
+		selection^[-1]:[1] := ' ', h^:[1] := ' '
+		END showSelection;
+
+	PROCEDURE processAnswer;
+		LABEL testM, enter, error1, error2, error3;
+
+		PROCEDURE getDataBase;
+			BEGIN
+			currentOutput := memory, saveStatus, startp := heap, outCr;
+			checkMode := full, dumpDataBase, endp := heap, outCr;
+			currentOutput := terminal, clearDataBase
+			END getDataBase;
+
+		PROCEDURE move2;
+			BEGIN
+			MOVE(startp, endp, heap);
+			endp := heap + (endp - startp), startp := heap + 1
+			END move2;
+
+		BEGIN { processAnswer }
+		showSelection, clearScreen;
+		CASE inputCharacter OF
+		'S':	IF	dataBase = NIL
+			THEN	changeDataBase := noDataBase, outString(@temptyDataBase)
+			ELSE	save
+			ENDIF
+			END
+		'L', 'M':
+			saveDataBase;
+			IF	inputCharacter = 'M'
+			THEN	restMessage := @tMerge, getFile;
+				CHECK, GOTO error1;
+				getDataBase, move2, heap := endp + 1
+			ELSE	restMessage := @tLoad, getFile
+			ENDIF;
+			open;
+			IF	h <> 0FFH
+			THEN	makeFCB, BDOS(compute_file_size, @File);
+				IF	(File[33] >>= maxRecord) OR (inputCharacter = 'M')
+					AND (File[33] >>= (top - heap) DIV recordSize)
+				THEN	outString(@tfileTooBig), GOTO testM
+				ELSE	makeFCB, open, bufferPointer := @buffer + recordSize;
+					currentOutput := memory;
+					IF	inputCharacter = 'L'
+					THEN	clearDataBase, outCr, startp := heap;
+						changeDataBase := FALSE
+					ELSIF	changeDataBase = noDataBase
+					THEN	changeDataBase := FALSE
+					ELSE	changeDataBase := TRUE
+					ENDIF;
+					LOOP
+						readCh, ch := ch AND 7FH;
+						IF	(ch >>= 32) AND (ch <<= 126) OR (ch = cr)
+						THEN	outCharacter(ch)
+						ELSIF	ch = lf
+						THEN
+						ELSIF	ch = tab
+						THEN	outSpace
+						ELSIF	ch = eof
+						THEN	EXIT
+						ELSE	outCharacter('#')
+						ENDIF
+					ENDLOOP;
+					endp := heap, outCr, outCharacter(eof);
+					currentOutput := terminal;
+					clearDataBase, GOTO enter
+				ENDIF
+			ELSE	outString(@tfileNotFound);
+				testM:
+				IF	inputCharacter = 'M'
+				THEN	endp^[1]:[1] := eof, clearDataBase, GOTO enter
+				ENDIF
+			ENDIF
+			END
+		'D':	CHECK, GOTO error1, getDataBase;
+			errorMessage := @teditDataBase, bufferp := heap + 1;
+			LOOP
+				move2, bufferLimit := top - 1, restMessage := 0, edit;
+				IF	changeDataBase <> TRUE
+				THEN	changeDataBase := changeFlag
+				ENDIF;
+				enter:h := top - endp + startp;
+				MOVE(startp - 1, endp + 1, h);
+				endp := h + 1 + (endp - startp), startp := h, bufferp := h;
+				CHECK, GOTO error2, checkMode := split;
+				parseDataBase;
+				error2:
+				IF	errorMessage = 0
+				THEN	EXIT;
+					error1:restoreStatus, currentOutput := terminal;
+					printError, EXIT
+				ENDIF;
+				clearDataBase, bufferp := heap + (bufferp - startp) - 2
+			ENDLOOP
+			END
+		'Q':	endp := qendp, startp := @queryBuffer + 1, bufferp := qbufferp;
+			saveStatus, bufferLimit := @queryBuffer + (queryBufferSize - 2);
+			errorMessage := @teditQuery, CHECK, GOTO error3;
+			LOOP
+				restMessage := 0, edit, qbufferp := bufferp, qendp := endp;
+				bufferp := startp, checkMode := split, theorem := top - 1;
+				endTheorem := theorem, initParser, termList, downMove;
+				IF	sym = dotSym
+				THEN	getSym
+				ELSE	error(@terr3)
+				ENDIF;
+				IF	errorMessage = 0
+				THEN	n := theorem, rule := theorem, varCounter := 0;
+					nameList := NIL, openedFile := FALSE, scope := 1, traverse;
+					queryVarp := varp, varCounter := varp[number];
+					resetVars, askStatus := failQuestion, n := theorem;
+					makeList, shouldContinue := TRUE, errorMessage := 0;
+					level := 0, checkMode := full;
+					allocate(@varVal[0], 512), clear;
+					prove(rule, @dummy);
+					error3:resetVars, restoreStatus, closeFile;
+					printError;
+					IF	askStatus = successQuestion
+					THEN	outString(@tyes)
+					ELSIF	askStatus = failQuestion
+					THEN	outString(@tno)
+					ENDIF;
+					EXIT;
+				ENDIF;
+				restoreStatus
+			ENDLOOP
+			END
+		'N':	resetTrace, traceMessage
+			END
+		'E':	exit2
+			END
+		'F':	clearFCB, File[1]:[11] := searchMask, setDMA;
+			h := BDOS(search_for_first, @File), k := 0;
+			WHILE h <> 255 DO
+				h := 32 * h + @buffer, i := 0;
+				REPEAT
+					incH, outCharacter(h^:[1]), incI
+				UNTIL	i = 8;
+				outString(@defExt), incK;
+				IF	k = namesPerLine
+				THEN	k := 0, newLine
+				ENDIF;
+				h := BDOS(search_for_next, @File)
+			ENDWHILE
+			END
+		'T':	setTrace, traceMessage
+			END
+		ENDCASE
+		END processAnswer;
+
+	BEGIN { main }
+	resetSystem, terminalString(@init), clearScreen, outString(@tversion);
+	LOOP
+		showSelection, Read(@inputCharacter), CAP(@inputCharacter);
+		IF	inputCharacter = cr
+		THEN	inputCharacter := selection^:[1], processAnswer
+		ELSIF	(inputCharacter = ctrlC) OR (inputCharacter = esc)
+		THEN	clearScreen, exit2
+		ELSIF	(inputCharacter = 'C') AND (bufferValid <> FALSE)
+		THEN	clearScreen, outString(@buffer)
+		ELSIF	(inputCharacter = ctrlS) OR (inputCharacter = bs) OR (inputCharacter = del)
+		THEN	IF	selection = @menu + 1
+			THEN	selection := @tExit
+			ELSE	h := selection - 2;
+			REPEAT
+				decH
+			UNTIL	h^:[1] = ' ';
+			selection := h + 1
+			ENDIF
+		ELSIF	(inputCharacter = ctrlD) OR (inputCharacter = ' ') OR (inputCharacter = tab)
+		THEN	IF	selection = @tExit
+			THEN	selection := @menu + 1
+			ELSE	selection := h + 2
+			ENDIF
+		ELSE	h := @menu;
+			LOOP
+				incH;
+				IF	h >> @tExit
+				THEN	EXIT
+				ENDIF;
+				IF	h^:[1] = inputCharacter
+				THEN	selection := h, processAnswer, EXIT
+				ENDIF
+			ENDLOOP
+		ENDIF
+	ENDLOOP
+	END main;
+
+BEGIN { PrologZ }
+main
+END PrologZ.
+

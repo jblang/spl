@@ -1,0 +1,15 @@
+	.Z80
+
+	ENTRY	.ITB
+
+; convert an integer to a boolean
+; set carry iff <HL> is 0
+.ITB:	LD	A,L	; get lower byte
+	OR	H	; or with upper byte
+	SCF		; set carry in preparation for case <HL> = 0
+	RET	Z	; done if <HL> is in fact equal to zero
+	XOR	A	; otherwise clear <A> and carry
+	RET
+
+	END
+

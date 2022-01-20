@@ -1,0 +1,120 @@
+; utilities for PROLOGZ
+; last change: 19-Jan-85
+
+	.Z80
+	ENTRY	MOVE, CHECK, RESTAR, CLEAR2, NEXTN, LASTN
+
+;PROCEDURE MOVE(WORD start, end, destination);
+;      EXTERNAL;
+MOVE:	POP	IY	; return address
+	POP	DE	; destination
+	POP	HL	; end
+	POP	BC	; start
+	PUSH	HL	; end
+	PUSH	BC	; start
+	OR	A	; clear carry
+	SBC	HL,BC
+	INC	HL	; HL:=end-start+1
+	LD	B,H	; BC:=end-start+1
+	LD	C,L
+	POP	HL	; HL:=start
+	PUSH	HL	; start
+	OR	A	; clear carry
+	SBC	HL,DE
+	JR	C,DECR	; IF start>>destination THEN GOTO DECR
+INCR:	POP	HL	; ELSE HL:=start
+	LDIR		; move up
+	POP	HL	; skip
+	JR	FINIS
+DECR:	LD	H,B
+	LD	L,C	; HL:=end-start+1
+	ADD	HL,DE	; HL:=end-start+1+destination
+        DEC	HL	; HL:=end-start+destination
+	EX	DE,HL	; HL:=destination, DE:=endp-start+destination
+	POP	HL	; skip
+	POP	HL	; end
+	LDDR		; move down
+FINIS:	JP	(IY)	; return
+
+EXPC:	DW	0
+EXSP:	DW	0
+
+;PROCEDURE CHECK;
+;      EXTERNAL;
+CHECK:	POP	HL	; return address
+	LD	(EXPC),HL
+	INC	HL	; skip next instruction (must be 3 Bytes!)
+	INC	HL
+	INC	HL
+	PUSH	HL	; new return address
+	LD	HL,2
+	ADD	HL,SP	; HL:=SP+2
+	LD	(EXSP),HL
+	RET
+
+;PROCEDURE RESTAR;
+;      EXTERNAL;
+RESTAR:	LD	SP,(EXSP)
+	LD	HL,(EXPC)
+	JP	(HL)
+
+;PROCEDURE CLEAR2(WORD start, size);
+;      EXTERNAL;
+CLEAR2:	POP	HL	; return address
+	POP	DE	; DE:=size
+	EX	(SP),HL	; HL:=start
+	LD	B,A	; B:=0;
+LOOP:	LD	A,D
+	OR	E
+	RET	Z	; IF DE=0 THEN return
+	LD	(HL),B	; HL^:[1]:=0
+	INC	HL	; start:=start+1
+	DEC	DE	; size:=size-1
+	JP	LOOP
+
+VARN	EQU	0060H
+
+;PROCEDURE NEXTN;
+;      EXTERNAL;
+NEXTN:	LD	HL,(VARN)
+	CALL	NEXTHL
+	JR	STORE
+
+;PROCEDURE LASTN;
+;      EXTERNAL;
+LASTN:	LD	HL,(VARN)
+	CALL	LASTHL
+STORE:	LD	(VARN),HL
+	XOR	A
+	RET
+
+NEXTHL:	LD	A,(HL)
+	CP	0	; predicate
+	JR	Z,PREDIC
+	CP	5	; dot
+	JR	Z,DOT
+	CP	6	; nilDot
+	JR	Z,NILDOT
+	DEC	HL
+	DEC	HL
+NILDOT:	DEC	HL
+	RET
+PREDIC:	DEC	HL
+	DEC	HL
+	DEC	HL
+	CALL	LASTHL
+	DEC	HL
+	RET
+DOT:	DEC	HL
+	CALL	NEXTHL
+	CALL	NEXTHL
+	RET
+
+LASTHL:	CALL	NEXTHL
+	LD	A,(HL)
+	CP	7	; bracket
+	JR	NZ,LASTHL
+	RET
+
+	END
+

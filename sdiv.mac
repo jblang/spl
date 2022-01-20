@@ -1,0 +1,24 @@
+	.Z80
+
+	ENTRY	.DIV
+	EXTRN	.WDV, .DCH, .HCH
+
+; <HL> := <HL> / <DE> (16-bit signed numbers)
+; reduce to unsigned case by changing signs of input and output where necessary
+.DIV:	BIT	7,H
+	JR	Z,DVDPOS	; HL >= 0
+	BIT	7,D
+	JR	Z,DIVP1		; HL < 0 and DE >= 0
+	CALL	.DCH		; HL < 0 and DE < 0
+	CALL	.HCH
+	JP	.WDV
+DVDPOS:	BIT	7,D
+	JP	Z,.WDV		; HL >= 0 and DE >= 0
+	CALL	.DCH		; HL >= 0 and DE < 0
+DIVCHS:	CALL	.WDV
+	JP	.HCH
+DIVP1:	CALL	.HCH
+	JR	DIVCHS
+
+	END
+

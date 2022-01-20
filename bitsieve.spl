@@ -1,0 +1,289 @@
+PROGRAM BitSieve;
+
+{	Version history
+	- 06-Aug-2004, P. Schorn, performed some optimizations
+	- 30-Jun-2004, P. Schorn, updated standard procedures
+	- 30-Mar-2002, P. Schorn, cleaned up data types
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+
+
+CONST	false			= 0;
+	true			= 1;
+	cr			= 15O;
+	lf			= 12O;
+	crlf			= cr + 256 * lf;
+	numPerLine		= 10;
+	spaces			= 7;
+	margin			= 200;
+	ctrlC			= 'C' - '@';
+	directConsoleIOCMD	= 6h;
+	prtCharCMD		= 2h;
+	prtStringCMD		= 9h;
+	defaultSieveSize	= 420;	{ produces 1241 primes }
+	cmdLineAddress		= 80h;
+
+BYTE	signon		= (crlf, 'BITSIEVE V2.05 (06-Aug-04)');
+	{ immediately to be followed by crlfString }
+	crlfString	= (crlf, '$':[1]);
+	num		= (crlf, 'Number of primes: $');
+	sizeOfSieve	= (crlf, '   Size of sieve: $');
+	usage		= (crlf, 'Usage: BITSIEVE [sieveSize in bytes] ',
+				'[P if print]', crlf, '$':[1]);
+	terminated	= (crlf, '... terminated.', crlf, crlf, '$':[1]);
+	commandLine AT cmdLineAddress;
+BYTE[8]	clearBit	= (	11111110B:[1], 11111101B:[1], 11111011B:[1],
+				11110111B:[1], 11101111B:[1], 11011111B:[1],
+				10111111B:[1], 01111111B:[1]);
+	getBit		= (	00000001B:[1], 00000010B:[1], 00000100B:[1],
+				00001000B:[1], 00010000B:[1], 00100000B:[1],
+				01000000B:[1], 10000000B:[1]);
+	original	= ('      5$');
+	number;
+	numberTwo	= ('      2$');
+	numberThree	= ('      3$');
+WORD	i, sieveBegin, sieveEnd, sieveSize, lineNumber, byteAddress;
+BYTE	bitAddress, printFlag;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(prtStringCMD, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(prtCharCMD, char)
+	END printChar;
+
+PROCEDURE newLine;
+	BEGIN
+	printString(@crlfString)
+	END newLine;
+
+PROCEDURE printSpaces(WORD n);
+	BEGIN
+	WHILE n > 0 DO
+		n := n - 1;
+		printChar(' ')
+	ENDWHILE
+	END printSpaces;
+
+PROCEDURE printIntFormatted(WORD int, width);
+	BEGIN
+	IF	int <<= 9
+	THEN	printSpaces(width - 1);
+		printChar(int + '0')
+	ELSE	printIntFormatted(int DIV 10, width - 1);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printIntFormatted;
+
+PROCEDURE initialize;
+	STATIC WORD maxSieve, result;
+	STATIC BYTE cmd;
+
+	PROCEDURE high(WORD topp);
+		BEGIN
+		topp^ := @topp - margin
+		END high;
+
+	PROCEDURE clearSieve;
+		BEGIN
+		i := sieveBegin;
+		WHILE i <<= sieveEnd DO
+			i^:[1] := 11111111B;
+			i := i + 1
+		ENDWHILE
+		END clearSieve;
+
+	{ read the integer pointed by 'cmd' and deposit result in 'result' }
+	PROCEDURE readInt;
+		STATIC BYTE tmp;
+		BEGIN
+		WHILE commandLine[cmd]:[1] = ' ' DO
+			cmd := cmd + 1
+		ENDWHILE;
+		result := 0;
+		LOOP	tmp := commandLine[cmd]:[1];
+			cmd := cmd + 1;
+			IF	(tmp << '0') OR (tmp >> '9')
+			THEN	EXIT
+			ENDIF;
+			result := 10 * result + (tmp - '0')
+		ENDLOOP
+		END readInt;
+
+	PROCEDURE getSieveSize;
+		BEGIN
+		IF	commandLine[0]:[1] = 0
+		THEN	sieveSize := defaultSieveSize;
+			printString(@usage);
+			printFlag := true;
+			newLine;
+		ELSE	cmd := 1;
+			readInt;
+			sieveSize := result;
+			IF	commandLine[commandLine[0]:[1]] = 'P'
+			THEN	printFlag := true;
+				newLine
+			ELSE	printFlag := false
+			ENDIF
+		ENDIF;
+		IF	sieveSize >> maxSieve
+		THEN	sieveSize := maxSieve
+		ENDIF
+		END getSieveSize;
+
+	BEGIN { initialize }
+	sieveBegin := LAST;
+	high(@maxSieve);
+	maxSieve := maxSieve - sieveBegin;
+	getSieveSize;
+	sieveEnd := sieveBegin + sieveSize;
+	clearSieve
+	END initialize;
+
+PROCEDURE incBitAddress;
+	BEGIN
+	bitAddress := bitAddress + 1;
+	IF	bitAddress = 8
+	THEN	bitAddress := 0;
+		byteAddress := byteAddress + 1
+	ENDIF
+	END incBitAddress;
+
+PROCEDURE calculatePrimes;
+	STATIC WORD iByteAddress, iBitAddress, loopCount, actDelta, delta,
+		double;
+	STATIC BYTE incDelta;
+	BEGIN
+	byteAddress	:= sieveBegin;
+	bitAddress	:= 0;
+	double		:= 10;
+	delta		:= 3;
+	incDelta	:= 4;
+	LOOP	loopCount	:= 0;
+		iByteAddress	:= byteAddress;
+		iBitAddress	:= bitAddress;
+		actDelta	:= delta;
+		WHILE iByteAddress <<= sieveEnd DO
+			actDelta	  := double - actDelta;
+			loopCount	  := loopCount + 1;
+			iBitAddress	  := iBitAddress + actDelta;
+			iByteAddress	  := iByteAddress + iBitAddress DIV 8;
+			iBitAddress	  := iBitAddress AND 7;
+			iByteAddress^:[1] := iByteAddress^:[1] AND
+				clearBit[iBitAddress]:[1]
+		ENDWHILE;
+		REPEAT	incBitAddress;
+			double		:= double + incDelta;
+			incDelta	:= 12 - incDelta;
+			delta		:= delta + 2
+		UNTIL	byteAddress^:[1] AND getBit[bitAddress]:[1] <> 0;
+		IF	6 * loopCount << double
+		THEN	EXIT
+		ENDIF
+	ENDLOOP
+	END calculatePrimes;
+
+PROCEDURE printPrimes;
+
+	PROCEDURE print(WORD stringp);
+		STATIC WORD ch;
+		BEGIN
+		ch := BDOS(directConsoleIOCMD, 0FFH);
+		IF	ch <> 0
+		THEN	IF	ch = ctrlC
+			THEN	printString(@terminated);
+				HALT
+			ENDIF;
+			IF	printFlag = false
+			THEN	printFlag := true;
+				IF	i <> 0
+				THEN	printIntFormatted(lineNumber, spaces);
+					printSpaces(spaces * i)
+				ENDIF
+			ELSE	printFlag := false;
+				IF	i <> 0
+				THEN	newLine
+				ENDIF
+			ENDIF
+		ENDIF;
+		IF	printFlag <> false
+		THEN	IF	i = 0
+			THEN	printIntFormatted(lineNumber, spaces)
+			ENDIF;
+			printChar(' ');
+			printString(stringp)
+		ENDIF;
+		i := i + 1;
+		IF	i = numPerLine
+		THEN	IF	printFlag <> false
+			THEN	newLine
+			ENDIF;
+			lineNumber := lineNumber + 1;
+			i := 0
+		ENDIF
+		END print;
+
+	PROCEDURE addTwo;
+		STATIC WORD j;
+		BEGIN
+		IF	number[6]:[1] = '9'
+		THEN	number[6]:[1] := '1';
+			j := @number + 5;
+			WHILE j^:[1] = '9' DO
+				j^:[1] := '0';
+				j := j - 1
+			ENDWHILE;
+			IF	j^:[1] = ' '
+			THEN	j^:[1] := '1'
+			ELSE	j^:[1] := j^:[1] + 1
+			ENDIF
+		ELSE	number[6]:[1] := number[6]:[1] + 2
+		ENDIF
+		END addTwo;
+
+	STATIC WORD toggle;
+
+	BEGIN { printPrimes }
+	lineNumber	:= 0;
+	i		:= 0;
+	toggle		:= 0;
+	bitAddress	:= 0;
+	byteAddress	:= sieveBegin;
+	number		:= original;
+	print(@numberTwo + 1);
+	print(@numberThree + 1);
+	WHILE byteAddress <<= sieveEnd DO
+		IF	byteAddress^:[1] AND getBit[bitAddress]:[1] <> 0
+		THEN	print(@number + 1)
+		ENDIF;
+		addTwo;
+		toggle := toggle + 1;
+		IF	toggle AND 1 = 0
+		THEN	addTwo
+		ENDIF;
+		incBitAddress
+	ENDWHILE;
+	IF	(i <> 0) AND (printFlag <> false)
+	THEN	newLine
+	ENDIF;
+	printString(@num);
+	printIntFormatted(lineNumber, 5);
+	printChar('0' + i);
+	printString(@sizeOfSieve);
+	printIntFormatted(sieveSize, 6);
+	newLine
+	END printPrimes;
+
+BEGIN
+printString(@signon);
+initialize;
+calculatePrimes;
+printPrimes
+END BitSieve.
+

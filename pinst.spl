@@ -1,0 +1,518 @@
+PROGRAM Pinst;
+
+{	Revised version 31-May-2004
+	- Automatically reads first record of PROLOGZ.COM for patching
+	Revised version 23-Feb-2002
+	- only runs if patch area has been changed
+}
+
+LABEL finis;
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	cr=13, lf=10, crlf=cr+256*lf, eof=1AH, esc=27;
+	consoleInputCmd		= 01h;
+	consoleOutputCmd	= 02h;
+	printStringCmd		= 09h;
+	openFileCmd		= 0Fh;
+	closeFileCmd		= 10h;
+	readSequentialCmd	= 14h;
+	writeSequentialCmd	= 15h;
+	setDMAAddressCmd	= 1Ah;
+	fcbSize = 36, recordSize = 128, patchSize = 43, patchAddress = 2DH;
+	itemsPerScreen = 6;
+	crOffset = 32;	{ Offset for Current Record in FCB }
+
+BYTE	tversion=(cr:[1], '   ', crlf, 'PINST V1.08 (31-May-04)  CINET', crlf,
+	lf:[1], '$':[1]);
+BYTE	copyRight=(crlf,
+	'Copyright (c) 1985', crlf,
+	'by   Peter  Schorn', crlf,
+	'Prinz-Eugen-Str. 6', crlf,
+	'D-8000 Muenchen 40', crlf,
+	'Tel. 089/300 25 78', crlf,
+	'Serialnumber CINET', crlf,
+	lf:[1], '$':[1], eof:[1]);
+BYTE[recordSize]
+	buffer=('PATCH AREA FOR FIRST RECORD OF PROLOGZ.COM');
+
+BYTE	table=(
+
+	"Std1: cursor_position      = <ESC> '='", crlf, '      ',
+	'      send line first', crlf, '      ',
+	"      erase_to_end_of_line = <ESC> 'K'$",
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	"Std2: cursor_position      = <ESC> '='", crlf, '      ',
+	'      send line first', crlf, '      ',
+	"      erase_to_end_of_line = <ESC> 'T'$",
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 84:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	"Std3: cursor_position      = <ESC> '='", crlf, '      ',
+	'      send column first', crlf, '      ',
+	"      erase_to_end_of_line = <ESC> 'T'$",
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	1:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 84:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	"Std4: cursor_position      = <ESC> 'Y'", crlf, '      ',
+	'      send line first', crlf, '      ',
+	"      erase_to_end_of_line = <ESC> 'K'$",
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	"Std5: cursor_position      = <ESC> 'Y'", crlf, '      ',
+	'      send column first', crlf, '      ',
+	"      erase_to_end_of_line = <ESC> 'K'$",
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	1:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Std6: ANSI$',				{ terminal name	}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 91:[1], 0, 0, 0,		{ CLEAD1		}
+	1:[1], 59:[1], 0:[1], 0,		{ CLEAD2		}
+	1:[1], 72:[1], 0:[1], 0,		{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	1:[1],					{ LINOFF		}
+	1:[1],					{ COLOFF		}
+	2:[1],					{ ASCUR			}
+	3:[1], 27:[1], 91:[1], 75:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'ADDS 20/25/30/40/60$',			{ terminal names	}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	1:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	3:[1], 27:[1], 48:[1], 80:[1], 0,	{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'ADDS Viewpoint-1A$',			{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	3:[1], 27:[1], 48:[1], 65:[1], 0,	{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Ampex D80$',				{ terminal name		}
+	24:[1],					{ HITE			}
+	40:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	1:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 84:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Lear-Siegler ADM-20, Morrow MDT-20$', { terminal names	}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	1:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 84:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Hazeltine Esprit$',			{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 17:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 15:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'IBM PC CCP/M bw, Teleray series 10, Zenith$', { terminal names	}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'IBM PC CCP/M color$',			{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	5:[1], 27:[1], 120:[1], 27:[1], 99:[1], 0:[1],{ INIT		}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Kaypro$',				{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	1:[1], 24:[1], 0, 0,			{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Lear-Siegler ADM-31, Liberty, Qume, Soroc, Apple CP/M', crlf,
+	'      Teletex 3000, Televideo 912/920/92$', { terminal names	}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 84:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Philipps P2000C$',			{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'NCR PC$',				{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 84:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'NorthStar ADVANTAGE$',			{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	1:[1], 14:[1], 0, 0,			{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Otrona Attache$',			{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 61:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1], 0,	{ ERAEOL		}
+	2:[1], 27:[1], 96:[1], 0:[1], 0,	{ INIT			}
+	0:[1], 27:[1], 97:[1], 0:[1], 0,	{ RESET			}
+
+	'RC-855 (ITT)$',			{ terminal name		}
+	25:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	1:[1], 6:[1], 0:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	1:[1], 30:[1], 0, 0,			{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'SSM-UB3$',				{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	1:[1], 27:[1], 0:[1], 0, 0, 0,		{ CLEAD1		}
+	1:[1], 59:[1], 0:[1], 0,		{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	1:[1],					{ CB4LFG		}
+	0:[1],					{ LINOFF		}
+	0:[1],					{ COLOFF		}
+	2:[1],					{ ASCUR			}
+	2:[1], 27:[1], 75:[1], 0:[1],0,		{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Tandberg TDV 2215$',			{ terminal name		}
+	25:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	1:[1], 16:[1], 0:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	0:[1],					{ LINOFF		}
+	0:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	4:[1], 27:[1], 91:[1], 48:[1], 75:[1], 0:[1],{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	'Visual 200$',				{ terminal name		}
+	24:[1],					{ HITE			}
+	80:[1],					{ WIDTH			}
+	2:[1], 27:[1], 89:[1], 0, 0, 0,		{ CLEAD1		}
+	0:[1], 0, 0,				{ CLEAD2		}
+	0:[1], 0, 0,				{ CTRAIL		}
+	0:[1],					{ CB4LFG		}
+	32:[1],					{ LINOFF		}
+	32:[1],					{ COLOFF		}
+	0:[1],					{ ASCUR			}
+	2:[1], 27:[1], 120:[1], 0:[1], 0,	{ ERAEOL		}
+	0:[1], 0:[1], 0, 0,			{ INIT			}
+	0:[1], 0:[1], 0, 0,			{ RESET			}
+
+	0:[1]);
+
+	leftBracket	= ('( $');
+	rightBracket	= (' ) $');
+	std		= (crlf, '(RET) Next frame', crlf, '(ESC) Quit program', crlf,
+			   lf:[1], 'Selection: $');
+	tnoSelection	= ('None'); { nl must follow immediately }
+	nl		= (crlf, '$':[1]);
+	tnotFound	= ('PROLOGZ.COM not found.', crlf, '$':[1]);
+	tioError	= ('I/O Error.', crlf, '$':[1]);
+	tokay		= (crlf, 'PROLOGZ.COM successfully initialised.', crlf, '$':[1]);
+	updatePatchArea1= ('Use DDT to initialize the patch area (0x$');
+	updatePatchArea2= (')', crlf, '$':[1]);
+BYTE[fcbSize]
+	patchFileFCB = (0:[1], 'PROLOGZ COM');
+WORD	position, i, j, k, ch, cpmResult;
+
+PROCEDURE CPM2(WORD function, input);
+	BEGIN
+	cpmResult := BDOS(function, input)
+	END CPM2;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	CPM2(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	CPM2(consoleOutputCmd, char)
+	END printChar;
+
+PROCEDURE printHexDigit(WORD digit);
+	BEGIN
+	IF	digit << 10
+	THEN	printChar(digit + '0')
+	ELSE	printChar(digit + ('A' - 10))
+	ENDIF
+	END printHexDigit;
+
+PROCEDURE printHex(WORD hex);
+	BEGIN
+	printHexDigit(hex DIV 16);
+	printHexDigit(hex AND 15)
+	END printHex;
+
+PROCEDURE printHexWord(WORD hex);
+	BEGIN
+	printHex(hex[1]:[1]);
+	printHex(hex[0]:[1])
+	END printHexWord;
+
+PROCEDURE checkIo;
+	BEGIN
+	IF	cpmResult >> 0
+	THEN	printString(@tioError), HALT
+	ENDIF
+	END checkIo;
+
+PROCEDURE newLine;
+	BEGIN
+	printString(@nl)
+	END newLine;
+
+PROCEDURE clearScreen;
+	BEGIN
+	i := 0;
+	REPEAT
+		i := i + 1, newLine
+	UNTIL i = 24
+	END clearScreen;
+
+PROCEDURE getData;
+	BEGIN
+	REPEAT
+		j := j + 1
+	UNTIL j^:[1] = '$'
+	END getData;
+
+PROCEDURE nextJ;
+	BEGIN
+	getData, j := j + (patchSize + 1)
+	END nextJ;
+
+BEGIN
+
+printString(@tversion);
+
+i := @patchFileFCB + 12, j := 0;
+REPEAT
+	i^:[1] := 0, i := i + 1, j := j + 1
+UNTIL j=21;
+
+CPM2(openFileCmd, @patchFileFCB);
+IF	cpmResult = 0FFH
+THEN	printString(@tnotFound), EXIT
+ENDIF;
+CPM2(setDMAAddressCmd, @buffer);
+CPM2(readSequentialCmd, @patchFileFCB);
+checkIo;
+patchFileFCB[crOffset]:[1] := 0;
+position := @table;
+LOOP
+	clearScreen, i := 0, j := position;
+	WHILE (j^:[1] <> 0 ) AND (i << itemsPerScreen) DO
+		printString(@leftBracket), printChar('A' + i), printString(@rightBracket);
+		printString(j), newLine, nextJ, i := i + 1
+	ENDWHILE;
+	printString(@std);
+	REPEAT
+		CPM2(consoleInputCmd, 0);
+		ch := cpmResult;
+		IF	ch = esc
+		THEN	printString(@tnoSelection), GOTO finis
+		ENDIF;
+		IF	(ch >>= 'a') AND (ch <<= 'z')
+		THEN	ch := ch + ('A' - 'a')
+		ENDIF;
+	UNTIL (ch = cr) OR (ch >>= 'A') AND (ch <<= ('A' - 1) + i);
+	IF	ch >>= 'A'
+	THEN	j := position;
+		WHILE ch >> 'A' DO
+			nextJ, ch := ch - 1
+		ENDWHILE;
+		newLine, getData, i := 0, k := @buffer + patchAddress;
+		REPEAT
+			j := j + 1, k^:[1] := j^:[1], i := i + 1, k := k + 1
+		UNTIL i = patchSize;
+		CPM2(writeSequentialCmd, @patchFileFCB), checkIo;
+		CPM2(closeFileCmd, @patchFileFCB);
+		IF	cpmResult <> 0FFH
+		THEN	cpmResult := 0
+		ENDIF;
+		checkIo, printString(@tokay), EXIT
+	ENDIF;
+	IF	j^:[1] = 0
+	THEN	position := @table
+	ELSE	position := j
+	ENDIF
+ENDLOOP;
+finis:
+
+END Pinst.
+

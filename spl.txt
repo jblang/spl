@@ -1,0 +1,1255 @@
+                        SSSSSSSS       PPPPPPPPP      L
+                       S        S      P        P     L
+                       S               P        P     L
+                       S               P        P     L
+                        SSSSSSSS       PPPPPPPPP      L
+                                S      P              L
+                                S      P              L
+                       S        S      P              L
+                        SSSSSSSS       P              LLLLLLLLL
+
+                       Simple          Programming    Language
+                             (C) Copyright 2015 by
+                                 Peter Schorn
+
+1. Invoking the compiler
+========================
+
+        SPL name.xy
+        SPL name.x
+        SPL name
+
+"x" determines the drive for the input file (extension .SPL and "y" determines
+the drive for the object file (extension .REL, L80 compatible).
+
+After compilation one needs to link the resulting file "name.REL" using L80 or similar.
+You can also add additional modules at this time. 
+
+Example for a complete compilation of a main program PROG.SPL which has needs
+two modules MOD1.SPL and MOD2.SPL:
+
+        SPL PROG
+        SPL MOD1
+        SPL MOD2
+        L80 MOD1,MOD2,PROG/N/E
+
+SPL requires a Z80 CPU to run and the resulting programs also require a Z80. On
+SIMH, SPL will automatically switch the CPU if an 8080 is detected. On regular
+platforms an error message will be printed and execution is terminated.
+
+
+2. The programming language SPL
+===============================
+
+2.1 Vocabulary
+--------------
+Reserved symbols are:
+
+AND        AT         BEGIN      BYTE       CASE       CONST      CONTINUE
+DIV        DO         ELSE       ELSIF      END        ENDCASE    ENDIF
+ENDLOOP    ENDWHILE   EXIT       EXPORT     EXTERNAL   FORWARD    GOTO
+IF         LABEL      LOOP       MOD        MODULE     NOT        OF
+OR         PROCEDURE  PROGRAM    REPEAT     RETURN     STATIC     THEN
+UNTIL      WHILE      WORD
+
+<<         <<=        >>         >>=        <          >           <>
+<=         >=         #          +          -          *          /
+&           @         (          )          [          ]          {
+}           =         :=         ^          ->         .          ,
+;          :           ..
+
+synonymous are
+"AND" and "&"
+"#"   and "<>"
+"->"  and "^"
+
+Note that the reserved symbols are not case sensitive. This means that "BEGIN", "Begin"
+or "begin" are all equivalent. Note however that identifiers are case sensitive.
+
+"{" starts a comment and "}" finishes it. Comments cannot occur within symbols
+such as reserved symbols, strings, identifiers and numbers. Comments may be
+nested.
+
+Example: "{ comment { nested comment }}" is a correct comment
+         "{ comment { nested comment }" is an incomplete comment
+
+Comments which start with a "$" sign are treated as compiler pragmas. The
+following values are valid:
+
+{$Ifilename.typ  } The file "filename.typ" is included after the comment
+(include file mechanism). Note that includes can also occur within comments.
+This is useful for terminating comments by including "}".
+
+{$Mpositive number } The internal variable M-limit is set to the specified
+number. Multiplications with constants less than or equal to M-limit are later
+replaced by more time efficient code.
+
+2.2 Syntax
+----------
+
+Binary Digit
+============
+
+-->--+------+------+
+     |      |      |
+   ("0")  ("1")  ("_")
+     |      |      |
+     +------+------+-->-
+
+The underscore character ("_") is used to separate digits.
+
+*******************************************************************************
+
+Octal Digit
+===========
+
+-->-+--------+------+------+------+------+------+
+    |        |      |      |      |      |      |
+ --------    |      |      |      |      |      |
+ |Binary|  ("2")  ("3")  ("4")  ("5")  ("6")  ("7")
+ |Digit |    |      |      |      |      |      |
+ --------    |      |      |      |      |      |
+    |        |      |      |      |      |      |
+    +--------+------+------+------+------+------+-->-
+
+*******************************************************************************
+
+Digit
+=====
+
+-->-+-------+------+
+    |       |      |
+ -------    |      |
+ |Octal|  ("8")  ("9")
+ |Digit|    |      |
+ -------    |      |
+    |       |      |
+    +-------+------+-->-
+
+*******************************************************************************
+
+Hex Digit
+=========
+
+-->-+-------+------+------+------+------+------+
+    |       |      |      |      |      |      |
+ -------    |      |      |      |      |      |
+ |Digit|  ("A")  ("B")  ("C")  ("D")  ("E")  ("F")
+ -------    |      |      |      |      |      |
+    |       |      |      |      |      |      |
+    +-------+------+------+------+------+------+-->-
+
+*******************************************************************************
+
+String
+======
+
+-->-+---('"')---('chars<>"')---('"')---+
+    |                                  |
+    +---("'")---("chars<>'")---("'")---+-->-
+
+A string can be empty (e.g. "") and may contain carriage return and line feed.
+Its size is only limited by available memory.
+
+*******************************************************************************
+
+Unsigned Integer
+================
+
+            -------
+-->-+---+---|Digit|---+---------------------+
+    |   |   -------   |                     |
+    |   |             |                     |
+    |   +------<------+-------------("D")---+
+    |                                       |
+    |       -------                         |
+    +---+---|Octal|---+-------------("O")---+
+    |   |   |Digit|   |                     |
+    |   |   -------   |                     |
+    |   |             |                     |
+    |   +------<------+-------------("C")---+
+    |                                       |
+    |       --------                        |
+    +---+---|Binary|---+------------("B")---+
+    |   |   |Digit |   |                    |
+    |   |   --------   |                    |
+    |   |              |                    |
+    |   +------<-------+                    |
+    |                                       |
+    |   -------       -------               |
+    +---|Digit|---+---| Hex |---+---("H")---+
+    |   -------   |   |Digit|   |           |
+    |             |   -------   |           |
+    |             |             |           |
+    |             +------<------+           |
+    |                                       |
+    |               --------                |
+    +---------------|String|----------------+-->-
+                    --------
+
+A string containing at most two characters is regarded as an Unsigned Integer.
+The empty string has value 0.
+
+*******************************************************************************
+
+Identifier
+==========
+
+-->-("letter")---+--------------------+
+                 |                    |
+                 +------("_")-----<---+
+                 |                    |
+                 |                    |
+                 +---("letter")---<---+
+                 |                    |
+                 |    -------         |
+                 +----|Digit|-----<---+-->-
+                      -------
+
+The underscore character ("_") is used to make identifiers more legible but is
+not significant, i.e. ident = i_dent = id_ent. All characters are significant,
+identifiers are case sensitive and their length is only limited by the
+available memory. Visibility rules correspond to other block structured
+languages such as PASCAL.
+
+*******************************************************************************
+
+Constant Factor
+===============
+
+                 ----------
+-->-+------------|Unsigned|------------+
+    |            |Integer |            |
+    |            ----------            |
+    |                                  |
+    |           ------------           |
+    +---("@")---| Variable |-----------+
+    |           |Identifier|           |
+    |           ------------           |
+    |                                  |
+    |           ------------           |
+    +-----------| Constant |-----------+
+    |           |Identifier|           |
+    |           ------------           |
+    |                                  |
+    |           ------------           |
+    +---("(")---| Constant |---(")")---+-->-
+                |Expression|
+                ------------
+
+"@" means "address of" and the following identifier must reference an already
+declared global variable. If a "Constant Identifier" is referenced, one has to
+make sure that the constant is defined and visible.
+
+*******************************************************************************
+
+Constant Term
+=============
+
+    ----------
+-->-|Constant|---+------------------+------+-------+--------+--------+-->-
+    | Factor |   |                  |      |       |        |        |
+    ----------   |                ("*")  ("/")  ("DIV")  ("MOD")  ("AND")
+                 |   ----------     |      |       |        |        |
+                 +---|Constant|--<--+--<---+---<---+---<----+---<----+
+                     | Factor |
+                     ----------
+
+"/" is the division operator for signed 16-bit values (range from -32768 to
+32767) while "DIV" is the division operator for unsigned 16-bit numbers (range
+from 0 to 65535). "MOD" computes the remainder and is also applied to unsigned
+16-bit numbers. "AND" denotes bitwise logical and.
+
+*******************************************************************************
+
+Constant Expression
+===================
+
+    +---("+")---+
+    |           |   ----------
+-->-+-----------+---|Constant|---+------------------+------+------+-->-
+    |           |   |  Term  |   |                  |      |      |
+    +---("-")---+   ----------   |                ("+")  ("-")  ("OR")
+                                 |   ----------     |      |      |
+                                 +---|Constant|--<--+--<---+--<---+
+                                     |  Term  |
+                                     ----------
+
+"OR" represents bitwise logical or. Special care has to be taken with constant
+expressions which contain addresses of global variables. In this case one has
+to ensure that the expression corresponds to one of the following two
+scenarios:
+1) @variable +/- constant
+2) @variable1 - @variable2
+
+*******************************************************************************
+
+Modifiers
+=========
+
+-->---+----+---------+----------+--------------------+-->-
+      |    |         |          |                    |
+      |  ("^")     ("[")      (":")                  |
+      |    |         |          |                    |
+      +-<--+    ------------  ("[")  ------------  ("]")
+      |         |Expression|    |    | Constant |    |
+      |         ------------    +----|Expression|----+
+      |              |               ------------
+      |            ("]")
+      |              |
+      +------<-------+
+
+
+*******************************************************************************
+
+Variable
+========
+
+     ------------   -----------
+-->--| Variable |---|Modifiers|--->-
+     |Identifier|   -----------
+     ------------
+
+The variable concept of SPL works as follows. "Variable Identifier" denotes an
+address in memory where a fixed length memory block starts. The length has been
+specified at declaration time. "^" means dereferencing and "[Expression]" adds
+an offset. The length of the variable can be set by specifying ":[Constant
+Expression]". The length is 2 if no ":[Constant Expression]" has been given and
+at least one "^" or "[Expression]" has occurred. Otherwise the length is the
+value given at declaration.
+
+Examples:
+Assume the following declarations:
+WORD a,b;BYTE c;BYTE[100] d;
+
+then we have
+a:=b;
+The contents of the 2-byte variable b is assigned to the 2-byte variable a.
+
+a^:=b;
+The contents of the 2-byte variable b is assigned to the 2-byte variable
+whose starting address is in a.
+
+a:=d[4];
+The 2-byte variable a is assigned the contents of a 2-byte variable whose
+address is computed by adding 4 to the address of d.
+
+a:[1]:=c;
+The byte at address a receives the byte at address c.
+
+a:=b^^[c+1]^[2]:[1];
+The 2-byte variable at address a is assigned a 2-byte value whose upper-byte is
+zero and whose lower byte is at the address computed as follows: Take the
+address of b, replace by the content (2 bytes), replace by the content (2
+bytes), add the contents at address c (1 byte, upper-byte is zero), add one,
+replace by the content and add 2.
+
+*******************************************************************************
+
+Factor
+======
+
+                ------------            -----------
+-->-+---("(")---|Expression|---(")")----|Modifiers|-------+
+    |           ------------            -----------       |
+    |                                                     |
+    |           ---------------------                     |
+    +-----------|Constant Identifier|---------------------+
+    |           ---------------------                     |
+    |                                                     |
+    |            ----------                               |
+    +---("@")----|Variable|-------------------------------+
+    |            ----------                               |
+    |                                                     |
+    |            -----------                              |
+    +---("@")----|Procedure|------------------------------+
+    |            -----------                              |
+    |                                                     |
+    |            ----------------                         |
+    +------------|Procedure Call|-------------------------+
+    |            ----------------                         |
+    |                                                     |
+    |            ------------------                       |
+    +------------|Unsigned Integer|-----------------------+
+    |            ------------------                       |
+    |                                                     |
+    |             --------                                |
+    +---("NOT")---|Factor|--------------------------------+
+    |             --------                                |
+    |                                                     |
+    |            ----------                               |
+    +------------|Variable|-------------------------------+-->-
+                 ----------
+
+"@" means "address of" and can be taken for all variables (global and local)
+and for procedures. The factor after "NOT" must be a boolean factor. Note also
+that the variables within "Factor" must be either global or local. Other
+(intermediate) variables, although visible, cannot be accessed. Dereferencing
+an "Expression" using "^" means to take the content at the referenced address.
+A "Procedure Call" is in fact a function call and the value of the call is the
+value returned using the "RETURN" statement.
+
+*******************************************************************************
+
+Term
+====
+
+    --------
+-->-|Factor|---+---------------+------+-------+--------+--------+-->-
+    --------   |               |      |       |        |        |
+               |             ("*")  ("/")  ("DIV")  ("MOD")  ("AND")
+               |   --------    |      |       |        |        |
+               +---|Factor|-<--+--<---+---<---+---<----+---<----+
+                   --------
+
+"/" means division of signed 16-bit integers. "DIV" is the division of unsigned
+16-bits integers. a MOD b computes the remainder one gets after dividing the
+unsigned 16-bit integer a by the unsigned 16-bit integer b. "AND" is logical
+"AND" if both factors are boolean and bit-wise and if both factors are numeric.
+
+*******************************************************************************
+
+Simple Expression
+=================
+
+    +---("+")---+
+    |           |   ------
+-->-+-----------+---|Term|---+-------------+------+------+-->-
+    |           |   ------   |             |      |      |
+    +---("-")---+            |           ("+")  ("-")  ("OR")
+                             |   ------    |      |      |
+                             +---|Term|-<--+--<---+--<---+
+                                 ------
+
+Similar to "Term".
+
+*******************************************************************************
+
+Expression
+==========
+
+    ------------
+-->-|  Simple  |---+--------------------------------+
+    |Expression|   |                                |
+    ------------   +----("=")----+                  |
+                   |             |                  |
+                   +---("<>")----+                  |
+                   |             |                  |
+                   +----(">")----+                  |
+                   |             |                  |
+                   +----("<")----+                  |
+                   |             |                  |
+                   +---(">=")----+                  |
+                   |             |                  |
+                   +---("<=")----+                  |
+                   |             |                  |
+                   +---(">>")----+                  |
+                   |             |                  |
+                   +---("<<")----+                  |
+                   |             |                  |
+                   +---(">>=")---+                  |
+                   |             |   ------------   |
+                   +---("<<=")---+---|  Simple  |---+-->-
+                                     |Expression|
+                                     ------------
+
+The comparison operators ">", "<", ">=", "<=" are used to compare signed 16-bit
+numbers. The comparison operators ">>", "<<", "">>=", "<<=" compare unsigned
+16-bit numbers. You can also compare boolean values using the comparison
+operators with the definition that false<true and false<<true. "=" and "<>"
+compare test for equality resp. in-equality for all data types (boolean,
+numeric and multi-byte).
+
+*******************************************************************************
+
+Type
+====
+
+-->-+---("STATIC")---+
+    |                |
+    |                |
+    +----------------+---("BYTE")---+----------------------------------+
+                     |              |                                  |
+                     |              |                                  |
+                     |              |           ------------           |
+                     +---("WORD")---+---("[")---| Constant |---("]")---+-->-
+                                                |Expression|
+                                                ------------
+"STATIC" declares variables stored in the global storage area (i.e. not on the
+stack). This is the default for global variables but can also be applied to
+variables within a procedure or to procedure parameters. "WORD" corresponds to
+two bytes, "BYTE" denotes one byte. If a "Constant Expression" is given, it
+denotes the number of bytes respectively words.
+
+*******************************************************************************
+
+Export Declaration
+==================
+
+                     ------------
+-->-("EXPORT")---+---|Identifier|----+-------+
+                 |   ------------    |       |
+                 |                 (",")   (";")
+                 |                   |       |
+                 |                   +---+-<-+
+                 |                       |
+                 +---------<-------------+------>-
+
+The list contains identifiers of global procedures and global variables which
+should be made accessible to other modules or programs. Procedures may be
+"FORWARD" but not "EXTERNAL".
+
+*******************************************************************************
+
+Label Declaration
+=================
+
+                    ------------
+-->-("LABEL")---+---|Identifier|----+-------+
+                |   ------------    |       |
+                |                 (",")   (";")
+                |                   |       |
+                |                   +---+-<-+
+                |                       |
+                +---------<-------------+----->-
+
+Labels must be declared before they can be used.
+
+*******************************************************************************
+
+Constant Declaration
+====================
+                                   +---------------->----------+
+                                   |                           |
+                    ------------   |           ------------    |
+-->-("CONST")---+---|Identifier|---+---("=")---| Constant |----+-------+
+                |   ------------               |Expression|    |       |
+                |                              ------------  (",")   (";")
+                |                                              |       |
+                |                                              +---+-<-+
+                |                                                  |
+                +-------------------<------------------------------+----->-
+
+In case no constant expression is given, the constant gets the value of the
+previously declared constant plus one. This is useful for defining simple
+enumeration "types".
+
+*******************************************************************************
+
+Value
+=====
+          --------
+-->-+-----|String|-----+
+    |     --------     |
+    |                  |
+    |   ------------   |
+    +---| Constant |---+------------------------------------------+
+        |Expression|   |                                          |
+        ------------   |                   ------------           |
+                       +---(":")---("[")---| Constant |---("]")---+-->-
+                                           |Expression|
+                                           ------------
+
+The "Constant Expression" in square brackets determines the amount of memory
+which should be reserved for the preceding value. If the value is a string and
+the "Constant Expression" is smaller than the length of the string, the string
+is truncated starting at the end. Note also that a string of length one (e.g.
+'P') is a number with default length 2. In case length one is needed, this
+needs to be specified explicitly (e.g. 'P':[1]).
+
+*******************************************************************************
+
+Variable Declaration
+====================
+
+            +---------------------------<-----------------------------+----->-
+            |                                                         |
+            |                 +-----------("EXTERNAL")-------+        |
+            |                 |                              |    +---+---+
+            |                 |            ------------      |    |       |
+            |                 |            | Constant |      |    |       |
+            |                 +---("AT")---|Expression|---+  |  (",")   (";")
+            |                 |            ------------   |  |    |       |
+    ------  |  ------------   |                           |  |    |       |
+-->-|Type|--+--|Identifier|---+---------------->----------+--+----+-------+
+    ------     ------------   |                              |
+                            ("=")                            |
+                              |           -------            |
+                              +-----------|Value|------------+
+                              |           -------            |
+                              |                              |
+                              |           -------            |
+                              +-("(")--+--|Value|--+--(")")--+
+                                       |  -------  |
+                                       |           |
+                                       +--(",")-<--+
+
+"Type" defines the length of the variable to be declared. Global variables can
+be preset either with an initial value or a list of initial values. The length
+of a variable with an initializer is the maximum of the length given in "Type"
+and the length needed for the initialization. Initialization starts at the
+start address of the variable (lowest address). Using "AT" you can specify the
+absolute start address of the variable.
+
+Examples:
+BYTE a;
+WORD z = 3; { Variable z initialized with 3 }
+BYTE[10] b,c=('Peter',0:[1]);  { 'Peter' and one byte 0 as initialization.
+The length of b and c is 10 in both cases }
+BYTE d=(1,2,3,4,5*6:[5]); { Initialization forces length of d to be
+2+2+2+2+5=13 }
+BYTE nc AT 80H; { number of characters in the standard input line buffer }
+
+*******************************************************************************
+
+Parameter List
+==============
+
+                +----------(";")-----<----------+
+                |                               |
+                |   ------       ------------   |
+-->-+---("(")---+---|Type|---+---|Identifier|---+---(")")---+-->-
+    |               ------   |   ------------   |           |
+    |                        |                  |           |
+    |                        +---<---(",")------+           |
+    |                                                       |
+    +-------------------------------------------------------+
+
+*******************************************************************************
+
+Procedure Declaration
+=====================
+
+                   ------------  -----------            -------
+-->-("PROCEDURE")--|Identifier|--|Parameter|--(";")-+---|Block|----+-(";")-->-
+                   ------------  |List     |        |   -------    |
+                                 -----------        |              |
+                                                    +-("FORWARD")--+
+                                                    |              |
+                                                    |              |
+                                                    +-("EXTERNAL")-+
+
+"Parameter List" corresponds to a variable declaration. The parameters can be
+accessed similar to local variables. Parameters are passed only by value but
+you can pass the address of a variable as well. Note that you also can define
+"STATIC" parameters and parameter passing works then by copying the parameters
+into the respective global storage area. The "FORWARD" declaration is necessary
+if you need to call a procedure which has not yet been defined. At time of
+definition the full parameter list needs to be repeated and you need to make
+sure that number and type of the parameters agree - the names of the parameters
+might be different.
+
+There is also a constraint on the maximal allowed total size of parameters and
+local variables: The first parameter (or first local variable if the procedure
+has no parameters) can have any size. The total size of the remaining
+parameters and local variables cannot exceed 124 bytes.
+
+Procedure declared as "EXTERNAL" must be defined in other
+modules or as assembler routines. The calling conventions are as follows:
+Non-static parameters are pushed on the stack in the order and size as they
+were defined in the parameter list. Static parameters use global memory just
+before the start address of the procedure (same order and size as in the
+parameter definition). The procedure is then called using "CALL" and must
+satisfy the following post-conditions: Accumulator register <A> must be zero,
+if there are parameters on the stack, all of them have been removed from the
+stack, the register <IX> has not been modified. Note also that names for
+assembler routines should be given in capital case as M80 does not create
+entries using lower case letters.
+
+*******************************************************************************
+
+Block
+=====
+
+    +--------<----------+
+    |                   |
+    |   -------------   |
+-->-+---|   Label   |---+
+    |   |Declaration|   |
+    |   -------------   |
+    |                   |
+    |   -------------   |
+    +---|   Const   |---+
+    |   |Declaration|   |
+    |   -------------   |
+    |                   |
+    |   -------------   |
+    +---| Variable  |---+
+    |   |Declaration|   |
+    |   -------------   |
+    |                   |
+    |   -------------   |
+    +---| Procedure |---+
+    |   |Declaration|
+    |   -------------
+    |
+    |               -----------             ------------
+    +---("BEGIN")---|Statement|---("END")---|Identifier|-->-
+                    |Sequence |             ------------
+                    -----------
+
+The identifier following "END" is the name of the block, i.e. the program- or
+procedure name.
+
+*******************************************************************************
+
+Statement
+=========
+
+-->-+--------------------------+---+------------------+
+    |                          |   |                  |
+    |   ------------           |   |                  |
+    |   |  Label   |           |   |   ------------   |
+    +---|Identifier|---(":")---+   +---|Assignment|---+
+        ------------               |   ------------   |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|Procedure|----+
+                                   |   |  Call   |    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  While  |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  Goto   |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|   If    |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  Case   |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  Repeat |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  Loop   |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|Continue |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  Return |----+
+                                   |   |Statement|    |
+                                   |   -----------    |
+                                   |                  |
+                                   |   -----------    |
+                                   +---|  Exit   |----+-->-
+                                       |Statement|
+                                       -----------
+
+*******************************************************************************
+
+Statement Sequence
+==================
+
+        -----------
+-->-+---|Statement|----+-------+-->-
+    |   -----------    |       |
+    |                (",")   (";")
+    |                  |       |
+    |                  +---+-<-+
+    |                      |
+    +--------<-------------+
+
+*******************************************************************************
+
+Assignment
+==========
+
+             ------------             -----------
+-->-+--("(")-|Expression|-(")")-("^")-|Modifiers|--+
+    |        ------------             -----------  |
+    |                                              |
+    |  ----------                                  |        ------------
+    +--|Variable|----------------------------------+-(":=")-|Expression|-->-
+       ----------                                           ------------
+
+Using the first form of the assignment one can assign a value to a computed
+address. If the length of the left hand side is larger than two (e.g. var:[6])
+and the the expression on the right hand side has length one or two, then the
+assignment is still valid: The right hand side is interpreted as a two byte
+value and repeatedly assigned to the memory block of the right hand side until
+the memory block is filled. In case the length of the left hand side is odd,
+the last byte of the memory block will be filled with the lower byte of the
+right hand side.
+
+Examples:
+WORD[2] a;
+BYTE[3] b;
+...
+a :=   0; { a[0]:[1] = 0, a[1]:[1] = 0, a[2]:[1] = 0, a[3]:[1] = 0 }
+a :=   7; { a[0]:[1] = 7, a[1]:[1] = 0, a[2]:[1] = 7, a[3]:[1] = 0 }
+a := 258; { a[0]:[1] = 2, a[1]:[1] = 1, a[2]:[1] = 2, a[3]:[1] = 1 }
+b :=   0; { b[0]:[1] = 0, b[1]:[1] = 0, b[2]:[1] = 0               }
+b :=   7; { b[0]:[1] = 7, b[1]:[1] = 0, b[2]:[1] = 7               }
+b := 258; { b[0]:[1] = 2, b[1]:[1] = 1, b[2]:[1] = 2               }
+
+*******************************************************************************
+
+Procedure Call
+==============
+
+    ------------
+-->-|Identifier|---+------------------------------------------+-->-
+    ------------   |                                          |
+                   |               ------------               |
+                   +---("(")---+---|Expression|---+---(")")---+
+                               |   ------------   |
+                               |                  |
+                               +-------(",")--<---+
+
+The length of "Expression" must agree with the length given in the procedure
+declaration for the respective formal parameter. The only exception is that
+byte or word parameters can also be assigned to word or byte parameters by
+either ignoring the upper byte or setting it to zero.
+
+Identifier can also be a variable. In this case the value of the variable is
+used as starting address and the expressions given are pushed as parameters on
+the stack before executing the call. Make sure that the variable really
+contains the starting address of a procedure with the right number and length
+of parameters since this is not checked by the compiler.
+
+*******************************************************************************
+
+While Statement
+===============
+
+                ------------            -----------
+-->-("WHILE")---|Expression|---("DO")---|Statement|---("ENDWHILE")-->-
+                ------------            |Sequence |
+                                        -----------
+
+*******************************************************************************
+
+Goto Statement
+==============
+
+               ------------
+-->-("GOTO")---|Identifier|-->-
+               ------------
+
+"Identifier" is a label which has been declared in the same block.
+
+*******************************************************************************
+
+If Statement
+============
+
+            +----------------("ELSIF")-------<--------+
+            |                                         |
+            |  ------------             -----------   |
+-->-("IF")--+--|Expression|--("THEN")---|Statement|---+---+---+---("ENDIF")-->-
+               ------------             |Sequence |       |   |
+                                        -----------       |   |
+                                                          |   |
+                                 +-----------<------------+   |
+                                 |                            |
+                                 |              -----------   |
+                                 +---("ELSE")---|Statement|---+
+                                                |Sequence |
+                                                -----------
+
+*******************************************************************************
+
+Case Statement
+==============
+
+               ------------
+-->-("CASE")---|Expression|---("OF")---+
+               ------------            |
+                                       |
++------------------<-------------------+
+|
+|        ------------                                        -----------
++-----+--| Constant |--+------------------------+--+--(":")--|Statement|---+
+|     |  |Expression|  |                        |  |         |Sequence |   |
+|     |  ------------  |          ------------  |  |         -----------   |
+|     |                +--("..")--| Constant |--+  |                       |
+|     |                           |Expression|     |                       |
+|     |                           ------------     |                       |
+|     |                                            |                       |
+|     +----------------+----(",")---<---+-----<----+                       |
+|                      |                |                                  |
+|                      +----(";")---<---+                                  |
+|                                                                          |
++--------<-------+---("END")-------------------------<---------------------+
+                 |
+                 |              -----------
+                 +---("ELSE")---|Statement|---+---("ENDCASE")-->-
+                 |              |Sequence |   |
+                 |              -----------   |
+                 |                            |
+                 +----------------------------+
+
+Using ".." one can define a range as case labels, e.g. 'A'..'Z'. In case no
+label matches the "ELSE" branch is executed (if it exists) or nothing happens.
+
+*******************************************************************************
+
+Repeat Statement
+================
+
+                 -----------               ------------
+-->-("REPEAT")---|Statement|---("UNTIL")---|Expression|-->-
+                 |Sequence |               ------------
+                 -----------
+
+*******************************************************************************
+
+Loop Statement
+==============
+
+               -----------
+-->-("LOOP")---|Statement|---("ENDLOOP")-->-
+               |Sequence |
+               -----------
+
+The "Statement Sequence" is repeatedly executed until an exit statement is
+encountered. In this case execution proceeds after the "ENDLOOP".
+
+*******************************************************************************
+
+Continue Statement
+==================
+
+-->-("CONTINUE")-->-
+
+Restart the enclosing loop (LOOP, REPEAT or WHILE) at the top.
+
+*******************************************************************************
+
+Exit Statement
+==============
+
+-->-("EXIT")-->-
+
+Exit the enclosing loop, block or program. Note that you also can exit repeat-
+and while loops, procedures or the currently executing program.
+
+*******************************************************************************
+
+Return Statement
+================
+
+                ------------
+-->-("RETURN")--|Expression|-->-
+                ------------
+
+Return from the enclosing procedure with the value of "Expression".
+
+*******************************************************************************
+
+Module
+======
+                                                +--------<----------+
+                                                |                   |
+                 ------------                   |   -------------   |
+-->-("MODULE")---|Identifier|---(";")---+---+---+---|   Label   |---+
+                 ------------           |   |   |   |Declaration|   |
+                                        |   |   |   -------------   |
+            +-----------<---------------+   |   |                   |
+            |                               |   |   -------------   |
+            |    -------------              |   +---|   Const   |---+
+            +----|  Export   |--------------+   |   |Declaration|   |
+                 |Declaration|                  |   -------------   |
+                 -------------                  |                   |
+                                                |   -------------   |
+                                                +---| Variable  |---+
+                                                |   |Declaration|   |
+                                                |   -------------   |
+                                                |                   |
+                                                |   -------------   |
+                                                +---| Procedure |---+
+                                                |   |Declaration|
+                                                |   -------------
+                                                |
+                                                +---(".")-->-
+
+Modules can be compiled separately. Communication with other modules and
+programs is accomplished by using externally defined variables and procedures.
+
+*******************************************************************************
+
+Program
+=======
+
+                  ------------           -------
+-->-("PROGRAM")---|Identifier|---+---+---|Block|---(".")-->-
+                  ------------   |   |   -------
+                                 |   |
+             +---------<---------+   |
+             |                       |
+             |   -------------       |
+             +---|  Export   |-------+
+                 |Declaration|
+                 -------------
+
+*******************************************************************************
+
+
+3. Description of the user callable runtime procedures
+======================================================
+
+PROCEDURE BDOS(WORD func, input);EXTERNAL;
+The CP/M function "func" is executed. Any input parameter is given by "input"
+and any output value is returned in <HL> (BDOS needs to be called as a function
+if the output value is of interest).
+
+PROCEDURE BIOS(WORD func, input);EXTERNAL;
+The BIOS function low-byte of "func" is executed. Any input parameter is given
+by "input". <HL> contains the output value which is the value of <A> if the
+upper-byte of "func" was 0 and otherwise <HL>.
+
+PROCEDURE LAST;EXTERNAL;
+The register <HL> is set to the lowest address not used by the program. LAST
+must be called as a function to use this value.
+
+PROCEDURE HALT;EXTERNAL;
+Immediately stop the program and return to CP/M.
+
+PROCEDURE STPSUB;EXTERNAL;
+Delete the file "A:$$$.SUB". This effectively stops submit-jobs and is useful
+for a program detecting an error state which should also stop any pending
+submit jobs.
+
+PROCEDURE OUTPOR(WORD port, data);EXTERNAL;
+Send the lower byte of "data" to the port given by the lower byte of "port".
+
+PROCEDURE INPORT(WORD port);EXTERNAL;
+Read the byte from the port given by the lower byte of "port" and put it into
+<HL> (<H> is guaranteed to be zero). INPORT must be called as a function to use
+the value.
+
+PROCEDURE DELAY(WORD x);EXTERNAL;
+Execute exactly 1000 * x t-states. A t-state needs one cycle of the CPU, e.g. a
+4 MHz CPU can execute 4'000'000 t-states per second. Typical operations require
+between 4 and up to 23 t-states.
+
+PROCEDURE REBOOT;EXTERNAL;
+Reboot the Altair by jumping to 0FF00H.
+
+4. Description of all files of the SPL system
+=============================================
+
+SPL     .COM  ; SPL compiler
+SPL     .SPL  ; SPL compiler source in SPL
+STABEGIN.INC  ; contains "{" (disable statistics) or empty (enable statistics)
+STAEND  .INC  ; contains "}" (disable statistics) or empty (enable statistics)
+SPL     .TXT  ; this file - description of the language and the system
+
+SPLRTLB .REL  ; runtime library
+SPLRTLB .SUB  ; create SPLRTLB.REL
+
+MAKESPL .SUB  ; rebuild SPL and the runtime system
+C       .SUB  ; compile an SPL program
+
+INC     .SPL  ; version number incrementer
+SPL     .DAT  ; part of version number for SPL.COM
+SPLRTLB .DAT  ; part of version number for SPLRTLB.REL
+
+CERR    .SPL  ; utility to create splerror.dat from err.txt
+CERR    .SUB  ; automate creation of splerror.dat
+ERR     .TXT  ; all SPL error messages in readable form
+SPLERROR.DAT  ; all SPL error messages for SPL.COM
+RELDUMP .SPL  ; utility for dumping .REL files
+SYN     .SPL  ; create many syntax errors for testing purposes
+SYNL1   .SPL  ; used by SYN.SPL
+SYNL2   .SPL  ; used by SYNL1.SPL
+
+MST     .SPL  ; module for self test program
+ST      .SPL  ; self test program
+STC     .SUB  ; create and execute self test
+
+AND     .MAC  ; define .AND, 16-bit, bitwise AND
+BDOS    .MAC  ; define BDOS for calling the CP/M BDOS functions
+BEQBNE  .MAC  ; define .BEQ and .BNE, boolean comparison
+BIOS    .MAC  ; define BIOS for calling BIOS functions
+BTI     .MAC  ; define .BTI, bool to integer conversion
+DCHS    .MAC  ; define .DCH, 16-bit sign change for register <DE>
+DELAY   .MAC  ; define DELAY, execute an exact number of t-states
+DIV     .MAC  ; define .WDV and .MOD, unsigned 16-bit division and modulo
+DSP     .MAC  ; define .DSP, treat top of stack as address to CALL
+E0H     .MAC  ; define .E0H, is <HL> equal to zero
+HCHS    .MAC  ; define .HCH, 16-bit sign change for register <HL>
+IEQ     .MAC  ; define .IEQ, 16-bit equality
+IGE     .MAC  ; define .IGE, .IGX, .UGE and .UGX, 16-bit signed greater or equal
+			and unsigned greater or equal + swapped versions
+ILT     .MAC  ; define .ILT and .ILX, 16-bit signed less than or equal +
+			swapped version
+IND     .MAC  ; define .IND, jump table dispatcher
+INE     .MAC  ; define .INE, 16-bit not equal comparison
+INPORT  .MAC  ; define INPORT
+IOR     .MAC  ; define .IOR, 16-bit, bitwise OR
+ITB     .MAC  ; define .ITB, integer to bool conversion
+LAST    .MAC  ; define LAST
+MUL     .MAC  ; define .MUL, 16-bit multiplication
+NEQ     .MAC  ; define .NEQ and .NNE, multi byte equality comparison
+OUTPOR  .MAC  ; define OUTPOR
+R0V     .MAC  ; define .R0X and .R0V, return from procedure
+REBOOT  .MAC  ; define REBOOT
+RPV     .MAC  ; define .EP0, .EPV, .EPX, .RP0, .RPV, .R20, .R40, .RX0, .RMV2
+              ; procedure entry and return
+RXV     .MAC  ; define .RXV, procedure return
+SDIV    .MAC  ; define .DIV, 16-bit signed division
+START   .MAC  ; define .STA, .LAST, .FIN, CPUTYP, STPSUB and HALT
+STC     .MAC  ; define .STC, fill byte array with copies of <HL>
+ULT     .MAC  ; define .ULT and .ULX, unsigned less than + swapped version
+
+
+5. Error messages
+=================
+
+This list is only needed if the compiler is run without SPLERROR.DAT.
+
+ 01 Error in number
+ 02 ENDIF or ELSIF expected
+ 03 Use ":=" instead of "="
+ 04 Cannot assign boolean value
+ 05 Wrong type
+ 06 "^" expected
+ 07 Too few parameter
+ 08 CONTINUE outside of REPEAT, WHILE or LOOP loop
+ 09 Parameter list expected
+ 10 Boolean expression expected
+ 11 DO expected
+ 12 THEN expected
+ 13 UNTIL expected
+ 14 RETURN outside of a procedure
+ 15 ":=" expected
+ 16 Too many parameters
+ 17 Can only compare numeric or boolean values
+ 18 ENDWHILE expected
+ 19 Type of actual parameter does not match formal parameter
+ 20 ENDIF expected
+ 21 Size cannot be zero
+ 23 ":" expected
+ 24 ";" or "," expected
+ 25 ENDLOOP expected
+ 28 Cannot jump out of block
+ 31 Identifier expected
+ 32 Illegal label
+ 34 Identifier must be variable or procedure
+ 38 Division by 0
+ 39 Modulo with 0
+ 41 Identifier already defined
+ 43 "=" expected
+ 44 BYTE or WORD expected
+ 45 "]" expected
+ 46 "[" expected
+ 49 Cannot initialize local variable
+ 51 ")" " expected
+ 54 Program too complex
+ 55 ")" or "," expected
+ 56 ";" expected
+ 58 Block contains undefined but used label
+ 59 Variable expected
+ 60 Global variable expected
+ 61 Recursive constant declaration
+ 62 Constant expected
+ 63 Constant factor cannot start with this symbol
+ 65 BEGIN, LABEL, CONST, BYTE, WORD, PROCEDURE expected
+ 66 END expected
+ 67 Identifier is not name of this block
+ 68 PROGRAM or MODULE expected
+ 69 "." expected
+ 70 Variable must be local or global
+ 71 Numerical value expected
+ 72 Boolean expression expected
+ 76 Numeric factor expected
+ 79 Simple boolean expression expected
+ 81 OF expected
+ 82 Duplicate case entry
+ 83 ENDCASE expected
+ 84 Symbol exported but not declared
+ 86 Parameter list does not match previous
+ 87 Procedure declared forward but not defined
+ 88 End of file expected
+ 89 Recursive include not allowed
+ 90 Include file does not exist
+ 91 Error writing REL file
+ 92 Internal compiler error
+ 93 Constant has relocatable component
+ 94 Cannot export this kind of identifier
+ 95 Total size of local variables and parameters too large
+ 97 Illegal use of @-operator in constant expression
+
+
+6. Hints for space efficient coding
+===================================
+
+Observing the following hints reduces the size of the generated code.
+
+- Global and static variables usually need less space
+- Avoid non-static byte sized formal parameters but use word size instead
+  Example:
+  Instead of
+      PROCEDURE p(BYTE b);
+            BEGIN
+            b := 1
+            END p;
+
+  it is better to write
+      PROCEDURE p(WORD b);
+            BEGIN
+            b:[1] := 1
+            END p;
+- Unsigned operations are usually smaller than signed operations
+- Avoid expensive operations:
+  - Assignment of arrays or passing them as parameters
+  - @-operator of local, non-static variables or parameters
+  - Procedures which have parameters and local variables
+  - Case statement with many unused labels
+- If the same value needs to be assigned to many variables put them
+  sequentially one after the other
+  Example: a:=1 , b:=1 , c:=2 is better than a:=1 , c:=2 , b:=1
+- Use the constants 0, 1 and 2 where possible
+  Example: a := a + 1 creates more efficient code than a := a + 3
+- Make sure that EXIT, CONTINUE or RETURN statements are not followed
+  by ELSE or ELSIF. Example:
+  Instead of
+    IF    ch = 'A'
+    THEN  EXIT
+    ELSIF ch = 'U'
+    THEN  ...
+    ENDIF
+
+  it is better to write
+    IF    ch = 'A'
+    THEN  EXIT
+    ENDIF;
+    IF    ch = 'U'
+    THEN  ...
+    ENDIF
+- Taking the address of a local variable is cheaper if the variable
+  is declared at the end of the declaration. Example:
+  Instead of
+    PROCEDURE p;
+          WORD a, b, c, d;
+          BEGIN
+          d := @a
+          END p;
+
+  it is better to write
+    PROCEDURE p;
+          WORD b, c, d, a;
+          BEGIN
+          d := @a
+          END p;
+
+

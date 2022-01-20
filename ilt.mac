@@ -1,0 +1,17 @@
+	.Z80
+
+	ENTRY	.ILT, .ILX
+	EXTRN	.IGE
+
+; carry is set iff <HL> <= <DE> (16-bit signed numbers)
+; <DE> and <HL> are swapped
+.ILX:	EX	DE,HL
+
+; carry is set iff <DE> <= <HL> (16-bit signed numbers)
+; <DE> and <HL> remain unchanged
+.ILT:	CALL	.IGE		; carry is set iff <DE> > <HL>
+	CCF			; negate
+	RET
+
+	END
+

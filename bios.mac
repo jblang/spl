@@ -1,0 +1,44 @@
+; BIOS defines the interface to the BIOS
+
+	.Z80
+	ENTRY	BIOS
+
+BOOT	EQU	0000H
+
+; PROCEDURE BIOS(WORD func, input);EXTERNAL;
+; func<low byte>  = 0=WBOOT, 1=CONST, 2=CONIN, 3=CONOUT, etc.
+; func<high byte> = if = 0 then result is <A> else result is <HL>
+; input		  = input parameter (e.g. address, character)
+; <HL>		  = return value of <A> or <HL> (e.g. error code,
+;			address, character)
+
+BIOS:	POP	HL		; return address
+	POP	BC		; input
+	EX	(SP),HL		; put return address back on stack, <HL> := func
+	PUSH	HL		; save func
+	LD	H,A		; clear upper byte
+	LD	D,A		; clear upper byte
+	LD	E,L		; <DE> := func
+	ADD	HL,HL		; <HL> := 2 * func
+	ADD	HL,DE		; <HL> := 3 * func
+	LD	DE,(BOOT+1)	; base of BIOS jump vector
+	ADD	HL,DE		; <HL> contains address of function to be called
+	PUSH	IX		; save <IX> in case it is changed by the BIOS
+	LD	A,C		; some calls expect the parameter in <A>
+				; instead of <BC>
+	CALL	XBIOS		; call BIOS
+	POP	IX		; restore <IX>
+	POP	BC		; if <B> = 0 then result is <A>
+				;	else result is <HL>
+	LD	C,A		; save potential result in <C>
+	XOR	A		; restore invariant
+	CP	B		; <B> = 0 ?
+	RET	NZ		; no, we are done, result is already in <HL>
+	LD	L,C		; otherwise <HL> := <C>, upper byte is 0
+	LD	H,A
+	RET
+
+XBIOS:	JP	(HL)		; vectored jump
+
+	END
+

@@ -1,0 +1,1542 @@
+PROGRAM selftest;
+
+{	Version history
+	- 22-Mar-2015, P. Schorn, compatibility with new SPL compiler
+}
+
+WORD	a, b, c;
+
+{ test harness begins  - only limited self testing in this part }
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	printCharCMD		= 02h;
+	printStringCMD		= 9h;
+	true			= 1;
+	false			= 0;
+
+WORD	cpmResult, heap, failureCount, doTestHeap, firstFailure;
+BYTE	header = (' Case   Produced   Expected   Result', '$':[1]);
+		 {'   12     4 0004     4 0004   ok'}
+
+PROCEDURE testHeap; FORWARD;
+
+PROCEDURE CPM2(WORD function, input);
+	BEGIN
+	testHeap;
+	cpmResult := BDOS(function, input)
+	END CPM2;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	CPM2(printCharCMD, char)
+	END printChar;
+
+PROCEDURE printString(WORD stringP);
+	BEGIN
+	CPM2(printStringCMD, stringP)
+	END printString;
+
+PROCEDURE printLn;
+	STATIC BYTE crlfString = (cr:[1], lf:[1], '$':[1]);
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE printStringLn(WORD stringP);
+	BEGIN
+	printString(stringP);
+	printLn
+	END printStringLn;
+
+PROCEDURE printSpaces(WORD width);
+	BEGIN
+	WHILE width > 0 DO
+		printChar(' ');
+		width := width  - 1
+	ENDWHILE
+	END printSpaces;
+
+PROCEDURE printIntWidth(WORD int, width);
+	BEGIN
+	IF	int << 10
+	THEN	printSpaces(width - 1);
+		printChar(int + '0')
+	ELSE	printIntWidth(int DIV 10, width - 1);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printIntWidth;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	printIntWidth(int, 0)
+	END printInt;
+
+PROCEDURE printIntLn(WORD int);
+	BEGIN
+	printInt(int);
+	printLn
+	END printIntLn;
+
+PROCEDURE printIntHex(WORD int);
+
+	PROCEDURE printHexByte(WORD theByte);
+		STATIC BYTE hexDigits = ('0123456789ABCDEF');
+		BEGIN
+		printChar(hexDigits[theByte:[1] DIV 16]:[1]);
+		printChar(hexDigits[theByte:[1] AND 15]:[1])
+		END printHexByte;
+
+	BEGIN { printIntHex }
+	printHexByte(int[1]:[1]);
+	printHexByte(int:[1])
+	END printIntHex;
+
+PROCEDURE expect(WORD testid, producedResult, expectedResult, verbose);
+	STATIC	BYTE	ok	= ('   ok', '$':[1]);
+			fail	= (' fail', '$':[1]);
+	BEGIN
+	IF	(producedResult <> expectedResult) OR verbose
+	THEN	printIntWidth(testid, 5);
+		printChar(' ');
+		printIntWidth(producedResult, 5);
+		printChar(' ');
+		printIntHex(producedResult);
+		printChar(' ');
+		printIntWidth(expectedResult, 5);
+		printChar(' ');
+		printIntHex(expectedResult);
+		IF	producedResult = expectedResult
+		THEN	printStringLn(@ok)
+		ELSE	printStringLn(@fail);
+			IF	NOT failureCount
+			THEN	firstFailure := testid
+			ENDIF;
+			failureCount := failureCount + 1
+		ENDIF
+	ELSE	testHeap
+	ENDIF
+	END expect;
+
+PROCEDURE expectVerbose(WORD testid, producedResult, expectedResult);
+	BEGIN
+	expect(testid, producedResult, expectedResult, true)
+	END expectVerbose;
+
+PROCEDURE initTests;
+	BEGIN
+	heap := LAST;
+	failureCount := 0;
+	firstFailure := 0;
+	doTestHeap := true;
+	printStringLn(@header)
+	END initTests;
+
+PROCEDURE exitTests;
+	STATIC	BYTE	ok			= ('All tests successful',		'$':[1]);
+			fail			= ('Number of failed tests: ',		'$':[1]);
+			firstFailureText	= ('. First failure: ',			'$':[1]);
+	BEGIN
+	IF	failureCount = 0
+	THEN	printStringLn(@ok)
+	ELSE	printString(@fail);
+		printInt(failureCount);
+		printString(@firstFailureText);
+		printIntLn(firstFailure)
+	ENDIF
+	END exitTests;
+
+CONST	localSpaceConsumption = 100;
+
+PROCEDURE testHeap;
+	BYTE	stack;
+	STATIC	BYTE outofheap = ('Fatal error: Out of heap', '$':[1]);
+	BEGIN
+	IF	(@stack - heap <<= localSpaceConsumption + 128) AND doTestHeap
+	THEN	doTestHeap := 0;
+		printStringLn(@outofheap);
+		exitTests;
+		HALT
+	ENDIF
+	END	testHeap;
+
+{ test harness ends }
+
+
+{ code to be tested starts }
+
+PROCEDURE p14(WORD x; BYTE y); FORWARD;
+PROCEDURE p15(STATIC WORD x; BYTE y); FORWARD;
+PROCEDURE p16(WORD x; STATIC BYTE y); FORWARD;
+PROCEDURE p17(STATIC WORD x; STATIC BYTE y); FORWARD;
+
+PROCEDURE ep6(WORD x; BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep7(STATIC WORD x; BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep8(WORD x; STATIC BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep9(STATIC WORD x; STATIC BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep10(WORD x; BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep11(STATIC WORD x; BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep12(WORD x; STATIC BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep13(STATIC WORD x; STATIC BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep14(WORD x; BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep15(STATIC WORD x; BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep16(WORD x; STATIC BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep17(STATIC WORD x; STATIC BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep18(WORD x; BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep19(STATIC WORD x; BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep20(WORD x; STATIC BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep21(STATIC WORD x; STATIC BYTE y; STATIC BYTE[4] z); EXTERNAL;
+PROCEDURE ep(WORD x; BYTE y; BYTE[4] z); EXTERNAL;
+PROCEDURE ep10b(WORD xp; BYTE y; STATIC BYTE[4] z); EXTERNAL;
+
+WORD	ea EXTERNAL;
+WORD	eb EXTERNAL;
+BYTE[4]	ec EXTERNAL;
+BYTE	eby EXTERNAL;
+
+PROCEDURE p1;
+	BEGIN
+	a := 13
+	END p1;
+
+PROCEDURE p2(WORD ap, value);
+	BEGIN
+	ap^:[2] := value
+	END p2;
+
+PROCEDURE p3(STATIC WORD ap, value);
+	BEGIN
+	ap^:[2] := value
+	END p3;
+
+PROCEDURE p4(STATIC WORD ap; WORD value);
+	BEGIN
+	ap^:[2] := value
+	END p4;
+
+PROCEDURE p5(WORD ap; STATIC WORD value);
+	BEGIN
+	ap^:[2] := value
+	END p5;
+
+PROCEDURE p6(WORD ap; BYTE value);
+	BEGIN
+	ap^:[1] := value
+	END p6;
+
+PROCEDURE p7(STATIC WORD ap; STATIC BYTE value);
+	BEGIN
+	ap^:[1] := value
+	END p7;
+
+PROCEDURE p8(WORD ap; STATIC BYTE value);
+	BEGIN
+	ap^:[1] := value
+	END p8;
+
+PROCEDURE p9(STATIC WORD ap; BYTE value);
+	BEGIN
+	ap^:[1] := value
+	END p9;
+
+BYTE[4] a4, b4;
+PROCEDURE p10(BYTE[4] in; WORD resultP);
+	BEGIN
+	resultP^:[2] := in[0]:[2] - in[2]:[2]
+	END p10;
+
+PROCEDURE p11(STATIC BYTE[4] in; WORD resultP);
+	BEGIN
+	resultP^:[2] := in[0]:[2] - in[2]:[2]
+	END p11;
+
+PROCEDURE p12(STATIC BYTE[4] in; WORD resultP);
+	STATIC BYTE[4] buffer;
+	BEGIN
+	buffer := in;
+	resultP^:[2] := buffer[0]:[2] - buffer[2]:[2]
+	END p12;
+
+PROCEDURE p13(WORD a, b, rp);
+	BEGIN
+	rp^:[2] := a - b
+	END p13;
+
+PROCEDURE p18(WORD ap; BYTE a, b, c, d);
+	BEGIN
+	p14(ap, a);
+	p15(ap, -b);
+	p16(ap, c);
+	p17(ap, -d);
+	p14(ap, -a);
+	p15(ap, b);
+	p16(ap, -c);
+	p17(ap, d);
+	p14(ap, 1);
+	p15(ap, 2);
+	p16(ap, 3);
+	p17(ap, 4)
+	END p18;
+
+PROCEDURE p14(WORD xp; BYTE y);
+	BEGIN
+	xp^:[2] := xp^:[2] + y
+	END p14;
+
+PROCEDURE p15(STATIC WORD xp; BYTE y);
+	BEGIN
+	xp^:[2] := xp^:[2] + y
+	END p15;
+
+PROCEDURE p16(WORD xp; STATIC BYTE y);
+	BEGIN
+	xp^:[2] := xp^:[2] + y
+	END p16;
+
+PROCEDURE p17(STATIC WORD xp; STATIC BYTE y);
+	BEGIN
+	xp^:[2] := xp^:[2] + y
+	END p17;
+
+PROCEDURE epint(WORD x; BYTE y; BYTE[4] z);
+	BEGIN
+	ep6(x, 1, z);
+	ep7(x, 1, z);
+	ep8(x, 1, z);
+	ep9(x, 1, z);
+	ep10(x, 1, z);
+	ep11(x, 1, z);
+	ep12(x, 1, z);
+	ep13(x, 1, z);
+	ep6(x, 7, ec);
+	ep7(x, 7, ec);
+	ep8(x, 7, ec);
+	ep9(x, 7, ec);
+	ep10(x, 7, ec);
+	ep11(x, 7, ec);
+	ep12(x, 7, ec);
+	ep13(x, 7, ec);
+	ep14(x, 3, z);
+	ep15(x, 3, z);
+	ep16(x, 3, z);
+	ep17(x, 3, z);
+	ep18(x, 3, z);
+	ep19(x, 3, z);
+	ep20(x, 3, z);
+	ep21(x, 3, z);
+	ep14(x, 13, ec);
+	ep15(x, 13, ec);
+	ep16(x, 13, ec);
+	ep17(x, 13, ec);
+	ep18(x, 13, ec);
+	ep19(x, 13, ec);
+	ep20(x, 13, ec);
+	ep21(x, 13, ec)
+	END epint;
+
+PROCEDURE exbyte(WORD qp; BYTE b1);
+	CONST	len = 20;
+	STATIC BYTE	b;
+	STATIC BYTE[len] a1;
+	BYTE[len] a2;
+	BYTE i;
+	WORD j;
+	STATIC WORD result;
+
+	BEGIN { exbyte }
+	result := 0;
+
+	b1 := b1 + 1;
+	b1 := b1 - 1;
+	b1 := b1 OR 1;
+
+	b := 7;
+	b := b + 1;
+	b := b - 1;
+	b := b AND 6;
+
+	i := 0;
+	j := @a2;
+	WHILE i <<= len - 1 DO
+		a1[i]:[1] := b1;
+		j^:[1] := b1;
+		i := i + 1;
+		j := j + 1
+	ENDWHILE;
+	i := 0;
+	j := @a1;
+	REPEAT
+		IF	a2[i]:[1] = j^:[1]
+		THEN	result := result + 1
+		ENDIF;
+		i := i + 1;
+		j := j + 1
+	UNTIL	i = len;
+	qp^:[2] := b + b1 + result
+	END exbyte;
+
+PROCEDURE exadr(WORD rp);
+	STATIC WORD this;
+	STATIC WORD nextThis;
+	CONST adr = @this;
+	CONST adr2 = @nextThis - adr;
+	BEGIN
+	rp^:[2] := adr2
+	END exadr;
+
+PROCEDURE exittest(WORD a, b, rp);
+	BEGIN
+	rp^:[2] := a*b;
+	IF	a = b
+	THEN	EXIT
+	ENDIF;
+	rp^:[2] := a+b
+	END exittest;
+
+
+PROCEDURE ant(WORD x, y, rp);
+	WORD q;
+
+	PROCEDURE bear(WORD x, y, rp);
+		WORD q, q3;
+
+		PROCEDURE cole(WORD x, y, rp);
+			WORD q, q2, q3;
+
+			BEGIN { cole }
+			IF	x = 0
+			THEN	rp^:[2] := y
+			ELSE	x := x - 1;
+				ant(x, y+2, @q);
+				bear(x, y + 3, @q2);
+				cole(x, y + 4, @q3);
+				rp^:[2] := q + q2 + q3
+			ENDIF
+			END cole;
+		WORD q2;
+
+		BEGIN { bear }
+		IF	x = 0
+		THEN	rp^:[2] := y
+		ELSE	x := x - 1;
+			ant(x, y+2, @q);
+			bear(x, y+3, @q2);
+			cole(x, y + 4, @q3);
+			rp^:[2] := q + q2 + q3
+		ENDIF
+		END bear;
+
+	WORD q2;
+
+	BEGIN { ant }
+	IF	x = 0
+	THEN	rp^:[2] := y
+	ELSE	x := x - 1;
+		ant(x, y + 2, @q);
+		bear(x, y + 3, @q2);
+		rp^:[2] := q + q2
+	ENDIF
+	END ant;
+
+PROCEDURE testStatic(WORD resultP);
+	STATIC WORD a, sum, size;
+
+	PROCEDURE sizeConstMultiplication(WORD constant, resultP);
+		STATIC WORD ip, jp, size;
+
+		{ Precondition: <DE> contains original value of <HL>
+		  postcondition: emitted code multiplies <HL> by constant }
+		PROCEDURE constMultiplication(WORD constant);
+			BEGIN
+			IF	constant >> 1 { I.e. not done yet }
+			THEN	constMultiplication(constant DIV 2);
+				size := size + 1; {emitSimple0(dup2hl);}
+				IF	constant AND 1 = 1
+				THEN	size := size + 1 {emitSimple0(addhlde)}
+				ENDIF
+			ENDIF
+			END constMultiplication;
+
+		BEGIN { sizeConstMultiplication }
+		ip := constant;
+		jp := ip;
+		WHILE ip AND 1 = 0 DO
+			ip := ip DIV 2
+		ENDWHILE;
+		IF	ip = 1 { Constant is a power of two }
+		THEN	size := 0;
+			WHILE jp >> 1 DO
+				size := size + 1; {emitSimple0(dup2hl);}
+				jp := jp DIV 2
+			ENDWHILE
+		ELSE	size := 2;	{emitSimple0(lddehl);}
+					{ Only needed if constant is not a power of two }
+			constMultiplication(jp)
+		ENDIF;
+		resultP^:[2] := size
+		END sizeConstMultiplication;
+
+	BEGIN
+	a := 2;
+	sum := 0;
+	WHILE a <<= 1024 DO
+		sizeConstMultiplication(a, @size);
+		IF	size <<= 5
+		THEN	sum := sum + a
+		ENDIF;
+		a := a + 1
+	ENDWHILE;
+	resultP^:[2] := sum
+	END testStatic;
+
+PROCEDURE testExpressionDereference(WORD resultP);
+	STATIC WORD a, b, c, sum, xa, xb, xc, xd;
+	STATIC BYTE[4] d, e;
+
+	BEGIN
+	sum := 0;
+	a := 19;
+	b := 27*256+12;
+	c := 1900;
+	d[0]:[2] := 12345;
+	d[2]:[2] := 23456;
+	xd := 13 + @d;
+	xa := @a - 1;
+	xb := 7 + @b;
+	xc := @c - 10;
+	e := (xd - 13)^:[4];
+	resultP^:[2] := (xa + 1)^:[2] + (xb - 6)^:[1] + (xc + 10)^ + e[2]:[2] - e[0]:[2]
+	END testExpressionDereference;
+
+PROCEDURE testLeftHandExpression(WORD resultP);
+	STATIC WORD x1, y1;
+	WORD x, y;
+
+	BEGIN
+	x1 := 0e7e7h;
+	y := 07e7eh;
+	x := @x1 - 7;
+	y1 := @y + 1300;
+	(x*y + 2 + x + 5 - x*y) ^ := 1000;
+	(y1 - 1300) ^ := 2000;
+	resultP^:[2] := y + x1
+	END testLeftHandExpression;
+
+PROCEDURE testContinue(WORD resultP);
+	STATIC WORD b, c;
+	BEGIN
+	b := 0;
+	LOOP
+		b := b + 1;
+		IF	b = 13
+		THEN	c := c + 1;
+			CONTINUE;
+			c := c + 200
+		ENDIF;
+		IF	b = 100
+		THEN	EXIT
+		ENDIF
+	ENDLOOP;
+	b := 0;
+	WHILE b <<= 100 DO
+		b := b + 1;
+		IF	b = 17
+		THEN	c := c + 1;
+			CONTINUE;
+			c := c + 100
+		ENDIF
+	ENDWHILE;
+	b := 0;
+	REPEAT
+		b := b + 1;
+		IF	b = 23
+		THEN	c := c + 1;
+			CONTINUE;
+			c := c + 300
+		ENDIF
+	UNTIL	b = 100;
+	resultP^:[2] := c
+	END testContinue;
+
+PROCEDURE testConstantExpression;
+	STATIC WORD x, cc1;
+	STATIC WORD a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15;
+	STATIC WORD b1, b2, b3;
+	CONST	c1 = -2500 + (30 * 20 * (-6 - 2 - (+5 AND 67 OR 23 AND 1000) - 78 * 23 DIV 4) + 1600 - 2);
+		c2;
+		c3 = c1 + c2 + @x - 200 + c1;
+	BEGIN
+	a1 := 2500;
+	a2 := 30;
+	a3 := 20;
+	a4 := 6;
+	a5 := 2;
+	a6 := 5;
+	a7 := 67;
+	a8 := 23;
+	a9 := 1000;
+	a10 := 78;
+	a11 := 23;
+	a12 := 4;
+	a13 := 1600;
+	a14 := 2;
+	b1 := -a1 + (a2 * a3 * (-a4 - a5 - (+a6 AND a7 OR a8 AND a9) - a10 * a11 DIV a12) + a13 - a14);
+	b2 := b1 + 1;
+	b3 := c1 + c2 + @x - 200 + c1;
+	cc1 := -2500 + (30 * 20 * (-6 - 2 - (+5 AND 67 OR 23 AND 1000) - 78 * 23 DIV 4) + 1600 - 2);
+	expectVerbose(122, c1, b1);
+	expectVerbose(123, c2, b2);
+	expectVerbose(124, c3, b3);
+	expectVerbose(156, cc1, c1)
+	END testConstantExpression;
+
+PROCEDURE testAliasing;
+	STATIC WORD a, b, c;
+	WORD al, bl, cl;
+	CONST ac = 1234;
+	bc = 4325;
+	cc = 0707;
+	rc = ac + bc - cc + 1;
+	BEGIN
+	a := ac;
+	b := bc;
+	c := cc;
+	a := a  + (b - c);
+	b := a + 1;
+	expectVerbose(125, b, rc);
+	al := ac;
+	bl := bc;
+	cl := cc;
+	al := al  + (bl - cl);
+	bl := al + 1;
+	expectVerbose(126, bl, rc)
+	END testAliasing;
+
+PROCEDURE pointerArray;
+	CONST	result1 = (1234 AND 0FFH) + (2345 AND 0FFH) + (3456 AND 0FFH);
+	CONST	result2 = 1234 + 2345 + 3456;
+	STATIC WORD a, b, c, i, s1, s2, s3;
+	STATIC WORD[3] pa = (@a, @b, @c);
+	BEGIN
+	a := 1234;
+	b := 2345;
+	c := 3456;
+	i := 0;
+	s1 := 0;
+	s2 := 0;
+	WHILE i <<= 2 DO
+		s1 := s1 + pa[2*i]^[0]:[1];
+		s2 := s2 + pa[2*i]^[0]:[2];
+		s3 := s3 + pa[2*i]^:[2];
+		i := i + 1
+	ENDWHILE;
+	expectVerbose(127, s1, result1);
+	expectVerbose(128, s2, result2);
+	expectVerbose(129, s3, result2)
+	END pointerArray;
+
+PROCEDURE caseTest2;
+	STATIC WORD x, y;
+	BEGIN
+	x := 6;
+	y := 0;
+	CASE x OF
+		0:	y := 1001 END
+		3, 2, 1:y := 2002 END
+	ENDCASE;
+	expectVerbose(130, y, 0)
+	END caseTest2;
+
+PROCEDURE specialComparisons;
+	WORD	a, c;
+	STATIC WORD b;
+	BEGIN
+	a := 0;
+	b := 12345;
+	c := 34567;
+	IF	(a + b*c) - (b + 1)*(c - 1) + c - b - 1 = 0 { a = 0 }
+	THEN	a := a + 1
+	ELSE	a := a + 2
+	ENDIF; { a = 1 }
+	expectVerbose(131, a, 1);
+	IF	0 = (a + b*c) - (b + 1)*(c - 1) + c - b - 1
+	THEN	a := a + 1
+	ELSE	a := a + 2
+	ENDIF; { a = 3 }
+	expectVerbose(132, a, 3);
+	IF	(a + b*c) - (b + 1)*(c - 1) + c - b - 1 # 0
+	THEN	a := a - 3
+	ELSE	a := a + 1000
+	ENDIF; { a = 0 }
+	expectVerbose(133, a, 0);
+	IF	0 <> (a + b*c) - (b + 1)*(c - 1) + c - b - 1
+	THEN	a := a + 10000
+	ELSE	a := a + 1000
+	ENDIF; { a = 1000 }
+	expectVerbose(134, a, 1000);
+
+	a := 100;
+	b := 3;
+	c := 7;
+	IF	a + b*c < b + b*c { invokes optimization using .ILX }
+	THEN	a := 2
+	ELSE	a := 3
+	ENDIF;
+	expectVerbose(135, a, 3);
+
+	a := 100;
+	b := 3;
+	c := 7;
+	IF	a + b*c >= b + b*c { invokes optimization using .IGX }
+	THEN	a := 2
+	ELSE	a := 3
+	ENDIF;
+	expectVerbose(136, a, 2)
+
+	END specialComparisons;
+
+PROCEDURE testLargeLocal;
+	STATIC WORD x;
+
+	PROCEDURE large(WORD xP);
+		STATIC WORD x, y;
+		CONST	maxLocal = 121;
+			maxLocal1 = maxLocal-1;
+		BYTE b;
+		BYTE[maxLocal] c; { maxLocal is ok, maxLocal+1 is not }
+		BEGIN
+		b := 0;
+		x := 0;
+		WHILE b <<= maxLocal1 DO
+			c[b]:[1] := b;
+			x := x + b;
+			b := b + 1
+		ENDWHILE;
+		b := 0;
+		y := 0;
+		WHILE b <<= maxLocal1 DO
+			y := y + c[b]:[1];
+			b := b + 1
+		ENDWHILE;
+		xP^:[2] := x - y
+		END large;
+
+	BEGIN { testLargeLocal }
+	large(@x);
+	expectVerbose(137, x, 0);
+	x := "";
+	expectVerbose(138, x, 0)
+	END testLargeLocal;
+
+PROCEDURE testArithmetic;
+	STATIC WORD i, j;
+	CONST result = -1000+1-2+256*(-2000+2-1);
+	BEGIN
+	i := -1000;
+	i := i + 1;
+	j := -2000;
+	j := j + 2;
+	i := i - 2;
+	j := j - 1;
+	i := i + 256*j;
+	expectVerbose(139, i, result)
+	END testArithmetic;
+
+PROCEDURE testMultiplication;
+	STATIC WORD result, i, j;
+	BEGIN
+	i := -300;
+	REPEAT
+		j := 0;
+		result := 0;
+		REPEAT
+			expect(140, i*j, result, (i AND 7FH = 13) AND (j AND 7FH = 37));
+			result := result + i;
+			j := j + 1
+		UNTIL j = 301;
+		j := 0;
+		result := 0;
+		REPEAT
+			expect(141, i*j, result, (i AND 7FH = 29) AND (j AND 7FH = 59));
+			result := result - i;
+			j := j - 1
+		UNTIL j = -301;
+		i := i + 1
+	UNTIL i = 301
+	END testMultiplication;
+
+PROCEDURE testDivision;
+	STATIC WORD i, result1, result2;
+	BEGIN
+	i := -30000;
+	result1 := -300;
+	result2 := -30;
+	REPEAT
+		expectVerbose(142, i / 100, result1);
+		expectVerbose(143, i / 1000, result2);
+		expectVerbose(144, (-i) / 100, -result1);
+		expectVerbose(145, (-i) / 1000, -result2);
+		expectVerbose(146, (-i) / (-100), result1);
+		expectVerbose(147, (-i) / (-1000), result2);
+		expectVerbose(148, i / (-100), -result1);
+		expectVerbose(149, i / (-1000), -result2);
+		i := i + 10000;
+		result1 := result1 + 100;
+		result2 := result2 + 10
+	UNTIL i = 40000;
+	i := 0;
+	result1 := 0;
+	result2 := 0;
+	REPEAT
+		expectVerbose(150, i DIV 100, result1);
+		expectVerbose(151, i DIV 1000, result2);
+		expectVerbose(152, (i+17) MOD 100, 17);
+		expectVerbose(153, (i+254) MOD 1000, 254);
+		expectVerbose(154, (i+777) MOD 1000, 777);
+		i := i + 10000;
+		result1 := result1 + 100;
+		result2 := result2 + 10
+	UNTIL i = 70000
+	END testDivision;
+
+PROCEDURE testInitializer;
+	CONST max	= 3	+ 2	   + 3	+ 4;
+	STATIC WORD a = ('ABC', 'ABC':[2], 'ABC':[3], 'ABC':[4]);
+	STATIC WORD b = ('ABCABABCABC', 0:[1]);
+	BYTE i, c;
+	BEGIN
+	i := 0;
+	c := 0;
+	REPEAT
+		IF	a[i]:[1] = b[i]:[1]
+		THEN	c := c + 1
+		ENDIF;
+		i := i + 1
+	UNTIL	i = max;
+	expectVerbose(155, c, max)
+	END testInitializer;
+
+PROCEDURE testJumpDistance;
+	STATIC WORD a, b;
+	BEGIN
+	a := -1;
+	b := 0;
+	REPEAT
+		b := b + 1;
+		a := (((a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a+1)+1)+1)+2 { absolute jump }
+	UNTIL a = 6;
+	a := 2;
+	REPEAT
+		b := b + 1;
+		a := (((a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a+1)+1)+1)+1 { relative jump }
+	UNTIL a = 4;
+	expectVerbose(157, b, 2)
+	END testJumpDistance;
+
+PROCEDURE testRecursiveFunction;
+
+	PROCEDURE factorial(WORD x);
+		BEGIN
+		IF	x = 1
+		THEN	RETURN 1
+		ENDIF;
+		RETURN x*factorial(x-1)
+		END factorial;
+
+	BEGIN
+	expectVerbose(158, factorial(8), 1*2*3*4*5*6*7*8);
+	expectVerbose(159, factorial(20), 1*2*3*4*5*6*7*8*9*10*11*12*13*14*15*16*17*18*19*20)
+	END testRecursiveFunction;
+
+PROCEDURE testVeryLargeLocal;
+	STATIC WORD i, s1, s2;
+	CONST parSize = 777;
+	PROCEDURE p1(BYTE[parSize] x);
+		BEGIN
+		i := 0;
+		WHILE i << parSize DO
+			x[i]:[1] := i;
+			i := i + 1
+		ENDWHILE;
+		s1 := 0;
+		s2 := 0;
+		i := 0;
+		WHILE i << parSize DO
+			s1 := s1 + i:[1];
+			s2 := s2 + x[i]:[1];
+			i := i + 1
+		ENDWHILE;
+		expectVerbose(160, s1, s2)
+		END p1;
+
+	PROCEDURE p2(BYTE[parSize] x);
+		WORD i, s1, s2;
+		BEGIN
+		i := 0;
+		WHILE i << parSize DO
+			x[i]:[1] := i;
+			i := i + 1
+		ENDWHILE;
+		s1 := 0;
+		s2 := 0;
+		i := 0;
+		WHILE i << parSize DO
+			s1 := s1 + i:[1];
+			s2 := s2 + x[i]:[1];
+			i := i + 1
+		ENDWHILE;
+		expectVerbose(161, s1, s2)
+		END p2;
+
+	PROCEDURE p3;
+		STATIC WORD i, s1, s2;
+		BYTE[parSize] x;
+		BEGIN
+		i := 0;
+		WHILE i << parSize DO
+			x[i]:[1] := i;
+			i := i + 1
+		ENDWHILE;
+		s1 := 0;
+		s2 := 0;
+		i := 0;
+		WHILE i << parSize DO
+			s1 := s1 + i:[1];
+			s2 := s2 + x[i]:[1];
+			i := i + 1
+		ENDWHILE;
+		expectVerbose(162, s1, s2)
+		END p3;
+
+	BEGIN { testVeryLargeLocal }
+	p1(i:[parSize]);
+	p2(i:[parSize]);
+	p3
+	END testVeryLargeLocal;
+
+PROCEDURE testCompareLarge;
+	STATIC BYTE a = 'Peter';
+	STATIC BYTE b = 'PETER';
+	STATIC BYTE c = 'Peter';
+	BEGIN
+	expectVerbose(163, a = b, 0 = 1);
+	expectVerbose(164, a <> b, 0 <> 1);
+	expectVerbose(165, a = c, 1 = 1);
+	expectVerbose(166, a <> c, 1 <> 1)
+	END testCompareLarge;
+
+PROCEDURE testLongConstantAssignment;
+	CONST	alen = 17;
+		blen = 5;
+		av1 = 3;
+		av2 = av1 + 256 * av1;
+		av3 = 300;
+		bv1 = 253;
+		bv2 = 0fffeh;
+	STATIC BYTE[alen] a = 'hokus pokus';
+	STATIC WORD[blen] b = (1234, 4321, 1243, 2134, 1324);
+	STATIC WORD i, c;
+
+	BEGIN
+	a := av1;
+	i := 0;
+	c := 0;
+	WHILE i << alen DO
+		c := c + ((a[i]:[1] = av1) = (i MOD 2 = 0)) AND
+			((a[i]:[1] = 0) = (i MOD 2 = 1));
+		i := i + 1
+	ENDWHILE;
+	expectVerbose(167, c, alen);
+
+	a := av2;
+	i := 0;
+	c := 0;
+	WHILE i << alen DO
+		IF	a[i]:[1] = av1
+		THEN	c := c + 1
+		ENDIF;
+		i := i + 1
+	ENDWHILE;
+	expectVerbose(167, c, alen);
+
+	a := av3;
+	i := 0;
+	c := 0;
+	WHILE i << alen DO
+		c := c + ((a[i]:[1] = (av3 MOD 256)) = (i MOD 2 = 0)) AND
+			((a[i]:[1] = (av3 DIV 256)) = (i MOD 2 = 1));
+		i := i + 1
+	ENDWHILE;
+	expectVerbose(168, c, alen);
+
+	b := bv1;
+	i := 0;
+	c := 0;
+	WHILE i << blen DO
+		IF	b[2*i]:[2] = bv1
+		THEN	c := c + 1
+		ENDIF;
+		i := i + 1
+	ENDWHILE;
+	expectVerbose(169, c, blen);
+
+	b := bv2;
+	i := 0;
+	c := 0;
+	WHILE i << 2*blen DO
+		c := c + ((b[i]:[1] = (bv2 MOD 256)) = (i MOD 2 = 0)) AND
+			((b[i]:[1] = (bv2 DIV 256)) = (i MOD 2 = 1));
+		i := i + 1
+	ENDWHILE;
+	expectVerbose(169, c, 2*blen)
+
+	END testLongConstantAssignment;
+
+PROCEDURE testAlias;
+	WORD aa AT 103h;
+	WORD ba AT 105h;
+	BYTE ca AT 107h;
+	WORD cw AT 107h;
+	BEGIN
+	a := 7777;
+	b := 2323;
+	expectVerbose(170, a * b, aa * ba);
+	expectVerbose(171, a:[1] * b:[1], aa:[1] * ba:[1]);
+
+	eb := 999;
+	eby := 23;
+	ec[0]:[1] := 13;
+	ec[1]:[1] := eb - eb * (11 - eb);
+	ec[2]:[1] := 12;
+	ec[3]:[1] := eby - eby * (eby + 7);
+	expectVerbose(172, ec[1]:[1], (999 - 999 * (11 - 999)) AND 0ffh);
+	expectVerbose(173, ec[3]:[1], (23 - 23 * (23 + 7)) AND 0ffh);
+	a4 := ec;
+	ep10b(@eby, 34, ec);
+	expectVerbose(174, eby, (23 + 34 + ec[0]:[2] - ec[2]:[2]) AND 0ffh);
+	expectVerbose(175, a4 = ec, true);
+
+	b := 4343;
+	a := @b;
+	eby := a^:[1];
+	expectVerbose(176, eby, 4343 AND 0ffh);
+
+	b := 8765;
+	a := @b;
+	c[0]:[1] := a^:[1];
+	expectVerbose(177, c[0]:[1], 8765 AND 0ffh);
+
+	b := 7777;
+	a := @b;
+	ca := a^:[1];
+	expectVerbose(178, ca, 7777 AND 0ffh);
+
+	a := ca[1];
+	b := 251;
+	ca := b * b;
+	expectVerbose(179, ca, (251 * 251) AND 0ffh);
+	expectVerbose(180, ca[1], a);
+
+	b := 123;
+	a := b;
+	cw := b * b;
+	expectVerbose(181, cw, 123 * 123);
+	expectVerbose(182, b, a);
+
+	a := 531;
+	eby := a * a;
+	expectVerbose(183, eby, (531 * 531) AND 0ffh);
+
+	eby := 876;
+	a := @ec;
+	b := 7;
+	ep8(@eby, 78, (49 + a - b * b)^:[4]);
+	expectVerbose(184, eby, (876 + 78 + ec[0]:[2] - ec[2]:[2]) AND 0ffh);
+
+	eby := 0;
+	b := 7512;
+	expectVerbose(185, eby, 0);
+	ca := 0;
+	b := 5671;
+	expectVerbose(186, ca, 0);
+	a:[1] := 0;
+	b := 5431;
+	expectVerbose(187, a:[1], 0)
+
+	END testAlias;
+
+{$istINC.inc test include file mechanism as well }
+
+PROCEDURE testOpt;
+	PROCEDURE incb;
+		BEGIN
+		b := b + 1
+		END incb;
+		
+	BEGIN { testOpt }
+	
+	a := 1 + 256 * '*';
+	b := 0;
+	
+	IF	(a[0]:[1] >> 0) AND (a[a[0]:[1]]:[1] = '*')
+	THEN	incb
+	ENDIF;
+	
+	IF	a[0]:[1] >> 0
+	THEN	incb
+	ENDIF;
+	
+	IF	a[a[0]:[1]]:[1] = '*'
+	THEN	incb
+	ENDIF;
+	expectVerbose(206, b, 3)
+	
+	END testOpt;
+
+PROCEDURE infiniteRecursionTest;
+	BYTE[localSpaceConsumption] b;
+	WORD count;
+	BEGIN
+	count := 0;
+	REPEAT
+		b[count] := count;
+		count := count + 1
+	UNTIL count = localSpaceConsumption;
+	expect(2, @count, @count, false);
+	infiniteRecursionTest
+	END infiniteRecursionTest;
+
+{ code to be tested ends }
+
+
+CONST	addrA = @a;
+	deltaAdr = @c - @a;
+	c19times19 = 19*19;
+
+WORD	bAlias AT addrA+2;
+LABEL	theLabel;
+
+BEGIN
+initTests;
+
+
+{ tests begin}
+
+expectVerbose(12, deltaAdr, 4);
+
+b := 12321;
+expectVerbose(11, b, bAlias);
+
+expectVerbose(1, 19861, 19861);
+
+expectVerbose(9, @a, 103H);
+
+expectVerbose(2, ((-10) / (-2)) + 78 MOD 5 + @a + 2*3 - 10 DIV 2 + (-8), 104H);
+
+expectVerbose(10, ((-10) / (-2)) + 78 MOD 5  + 2*3 - 10 DIV 2 + (-8) + @a, 104H);
+
+a := 2;
+b := 3;
+expectVerbose(3, a+b, 5);
+
+a := 2000;
+b := 3000;
+expectVerbose(4, a-b, -1000);
+
+a := 200;
+b := -33;
+expectVerbose(5, a/b, -6);
+
+a := 2000;
+b := 17;
+expectVerbose(6, a DIV b, 117);
+
+a := 2000;
+expectVerbose(21, a DIV 2, 1000);
+
+a := 20;
+b := -33;
+expectVerbose(7, a*b, -660);
+
+a := 83H;
+b := 07H;
+expectVerbose(13, a AND b, 3);
+
+a := 83H;
+b := 07H;
+expectVerbose(14, a OR b, 87H);
+
+a := 83H;
+expectVerbose(15, a AND 3, 3);
+
+b := 03H;
+expectVerbose(16, 7 AND b, 3);
+
+a := 83H;
+expectVerbose(17, a OR 7, 87H);
+
+a := 83H;
+b := 07H;
+expectVerbose(18, 83H OR b, 87H);
+
+a := 17;
+expectVerbose(8, a*2, 34);
+
+a := -23;
+expectVerbose(8, 3*a, -69);
+
+a := -1;
+expectVerbose(8, 8*a, -8);
+
+a := 700;
+b := -13;
+expectVerbose(19, (7*a OR b), 0FFF7H);
+expectVerbose(22, (7*a OR b), -9);
+expectVerbose(21, a*b/(-10), 910);
+expectVerbose(22, (a + b)*(a - b - 1), 30392);
+expectVerbose(23, a MOD 10, 0);
+expectVerbose(24, a MOD 3, 1);
+expectVerbose(25, a DIV 2, 350);
+
+expectVerbose(20, (7*a OR b) + a*b/(-10) + (a + b)*(a - b - 1) - a MOD 10 + a MOD 3 + a DIV 2,
+	31644);
+
+
+a := 2000;
+b := -1000;
+expectVerbose(26, a = b, false);
+expectVerbose(27, b = a, false);
+expectVerbose(28, a = a, true);
+
+expectVerbose(29, a <> b, true);
+expectVerbose(30, b <> a, true);
+expectVerbose(31, a <> a, false);
+
+expectVerbose(32, a < b, false);
+expectVerbose(33, b < a, true);
+expectVerbose(34, a < a, false);
+
+expectVerbose(35, a <= b, false);
+expectVerbose(36, b <= a, true);
+expectVerbose(37, a <= a, true);
+
+expectVerbose(38, a << b, true);
+expectVerbose(39, b << a, false);
+expectVerbose(40, a << a, false);
+
+expectVerbose(41, a <<= b, true);
+expectVerbose(42, b <<= a, false);
+expectVerbose(43, a <<= a, true);
+
+expectVerbose(44, a > b, true);
+expectVerbose(45, b > a, false);
+expectVerbose(46, a > a, false);
+
+expectVerbose(47, a >= b, true);
+expectVerbose(48, b >= a, false);
+expectVerbose(49, a >= a, true);
+
+expectVerbose(50, a >> b, false);
+expectVerbose(51, b >> a, true);
+expectVerbose(52, a >> a, false);
+
+expectVerbose(53, a >>= b, false);
+expectVerbose(54, b >>= a, true);
+expectVerbose(55, a >>= a, true);
+
+
+expectVerbose(56, (a=b) = (a=b), true);
+expectVerbose(57, (a=b) = (a<>b), false);
+expectVerbose(58, (a<>b) = (a=b), false);
+expectVerbose(59, (a<>b) = (a<>b), true);
+
+expectVerbose(60, (a=b) <> (a=b), false);
+expectVerbose(61, (a=b) <> (a<>b), true);
+expectVerbose(62, (a<>b) <> (a=b), true);
+expectVerbose(63, (a<>b) <> (a<>b), false);
+
+expectVerbose(64, (a=b) < (a=b), false);
+expectVerbose(65, (a=b) < (a<>b), true);
+expectVerbose(66, (a<>b) < (a=b), false);
+expectVerbose(67, (a<>b) < (a<>b), false);
+
+expectVerbose(68, (a=b) <= (a=b), true);
+expectVerbose(69, (a=b) <= (a<>b), true);
+expectVerbose(70, (a<>b) <= (a=b), false);
+expectVerbose(71, (a<>b) <= (a<>b), true);
+
+expectVerbose(72, (a=b) > (a=b), false);
+expectVerbose(73, (a=b) > (a<>b), false);
+expectVerbose(74, (a<>b) > (a=b), true);
+expectVerbose(75, (a<>b) > (a<>b), false);
+
+expectVerbose(76, (a=b) >= (a=b), true);
+expectVerbose(77, (a=b) >= (a<>b), false);
+expectVerbose(78, (a<>b) >= (a=b), true);
+expectVerbose(79, (a<>b) >= (a<>b), true);
+
+
+a := 0;
+WHILE	a <<= 10 DO
+	CASE a OF
+	7, 8:	expectVerbose(80, (a = 7) OR (a = 8), true);
+		b := 0;
+		WHILE	b <<= 10 DO
+			CASE b OF
+			7:	expectVerbose(112, b, 7)
+				END
+			2..3,
+			5..6:	expectVerbose(113, (2 <<= b) AND (b <<=6)
+					AND NOT NOT NOT (b = 4), true)
+				END
+			ELSE	expectVerbose(114,
+				(0 <<= b) AND (b <<= 1) OR (b = 4) OR
+					(8 <<= b) AND (b <<= 10), true)
+			ENDCASE;
+			b := b + 1
+		ENDWHILE
+		END
+	2..3,
+	5..6:	expectVerbose(81, (2 <<= a) AND (a <<=3) OR
+			(5 <<= a) AND (a <<= 6), true)
+		END
+	ELSE	expectVerbose(82,
+		(0 <<= a) AND (a <<= 1) OR (a = 4) OR
+			(8 <<= a) AND (a <<= 10), true)
+	ENDCASE;
+	a := a + 1
+ENDWHILE;
+
+a := 1;
+WHILE a <<= 100 DO
+	a := a + 2;
+	IF	a = 95
+	THEN	EXIT
+	ENDIF
+ENDWHILE;
+expectVerbose(83, a, 95);
+
+a := 1;
+REPEAT
+	a := a + 3;
+	IF	a = 91
+	THEN	EXIT
+	ENDIF
+UNTIL	a >>= 100;
+expectVerbose(84, a, 91);
+
+a := 100;
+LOOP
+	a := a - 1;
+	IF	a = 81
+	THEN	EXIT
+	ENDIF
+ENDLOOP;
+expectVerbose(85, a, 81);
+
+a := 2;
+b := 7;
+c := 5;
+IF	(a = b) OR (a = 5) OR (a = 2)
+THEN	c := 1
+ELSIF	b = 7
+THEN	c := c + 1
+ENDIF;
+expectVerbose(86, c, 1);
+
+a := 2;
+b := 7;
+c := 100;
+IF	(a = b) OR (a = 5) OR (a = 22)
+THEN	c := 1
+ELSIF	b = 7
+THEN	c := c + 1
+ELSE	c := c + 7
+ENDIF;
+expectVerbose(87, c, 101);
+
+a := 2;
+b := -7;
+c := 1000;
+IF	(a = b) OR (a = 5) AND (a = 22)
+THEN	c := 1
+ELSIF	b = 7
+THEN	c := c + 1
+ELSE	c := c + 7
+ENDIF;
+expectVerbose(88, c, 1007);
+
+a := -12;
+p1;
+expectVerbose(89, a, 13);
+
+a := 0;
+p2(@a, 55);
+expectVerbose(90, a, 55);
+
+a := 0;
+p3(@a, -34);
+expectVerbose(91, a, -34);
+
+a := 0;
+p4(@a, -100);
+expectVerbose(92, a, -100);
+
+a := 0;
+p5(@a, 19);
+expectVerbose(93, a, 19);
+
+a := 256*18+7;
+p6(@a, 33);
+expectVerbose(94, a, 256*18+33);
+
+a := 256*18+77;
+p7(@a, 31);
+expectVerbose(95, a, 256*18+31);
+
+a := 256*18+77;
+p8(@a, 30);
+expectVerbose(96, a, 256*18+30);
+
+a := 256*18+77;
+p9(@a, 29);
+expectVerbose(97, a, 256*18+29);
+
+a := 0;
+a4[0]:[2] := 1000;
+a4[2]:[2] := 300;
+p10(a4, @a);
+expectVerbose(98, a, 700);
+
+a := 0;
+a4[0]:[2] := 1100;
+a4[2]:[2] := 400;
+b4 := a4;
+p11(b4, @a);
+expectVerbose(99, a, 700);
+
+a := 0;
+a4[0]:[2] := 1200;
+a4[2]:[2] := 500;
+b4 := a4;
+p12(b4, @a);
+expectVerbose(100, a, 700);
+
+a := 1234;
+b := 334;
+c := @p13;
+c(a, b, @a);
+expectVerbose(101, a, 900);
+
+a := 0;
+theLabel:
+a := a + 1;
+IF	a <> 100
+THEN	GOTO theLabel
+ENDIF;
+expectVerbose(102, a, 100);
+
+a := 1000;
+p18(@a, 77, 23, 255, 100+8*256);
+expectVerbose(103, a, 2034);
+
+ea := 500;
+a4[0]:[2] := 7000;
+a4[2]:[2] := 2000;
+ec := a4;
+ep6(@ea, 7, ec);
+expectVerbose(105, ec:[2], 7000);
+expectVerbose(106, ec[2]:[2], 2000);
+expectVerbose(104, ea, 5507);
+
+ea := 500;
+a4[0]:[2] := 7000;
+a4[2]:[2] := 2000;
+ep6(@ea, 7, a4);
+expectVerbose(107, ea, 5507);
+
+ea := 300;
+a4[0]:[2] := 6000;
+a4[2]:[2] := 2000;
+b4[0]:[2] := 3000;
+b4[2]:[2] := 2900;
+ec := b4;
+ep(@ea, 5, a4);
+expectVerbose(108, ea, 556);
+
+ea := 300;
+a4[0]:[2] := 6000;
+a4[2]:[2] := 2000;
+b4[0]:[2] := 3000;
+b4[2]:[2] := 2900;
+ec := b4;
+epint(@ea, 5, a4);
+expectVerbose(109, ea, 556);
+
+a := -1;
+exbyte(@a, 6);
+expectVerbose(110, a, 33);
+
+a := -1;
+exadr(@a);
+expectVerbose(111, a, 2);
+
+a := 0;
+exittest(3, 5, @a);
+expectVerbose(115, a, 8);
+
+a := 0;
+exittest(19, 19, @a);
+expectVerbose(116, a, c19times19);
+
+a := 0;
+ant(3, 7, @a);
+expectVerbose(117, a, 200);
+
+a := 0;
+testStatic(@a);
+expectVerbose(118, a, 76);
+
+a := 0;
+testExpressionDereference(@a);
+expectVerbose(119, a, 13057);
+
+a := 0;
+testLeftHandExpression(@a);
+expectVerbose(120, a, 3000);
+
+a := 0;
+testContinue(@a);
+expectVerbose(121, a, 3);
+
+testConstantExpression;
+testAliasing;
+pointerArray;
+caseTest2;
+specialComparisons;
+testLargeLocal;
+testArithmetic;
+testMultiplication;
+testDivision;
+testInitializer;
+testJumpDistance;
+testRecursiveFunction;
+testVeryLargeLocal;
+testCompareLarge;
+testLongConstantAssignment;
+testAlias;
+testConstant;
+testOpt;
+
+infiniteRecursionTest; { put at end }
+
+{ tests end }
+
+exitTests
+END selftest.
+
+

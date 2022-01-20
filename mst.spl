@@ -1,0 +1,163 @@
+MODULE selftest;
+
+EXPORT	ea, eb, ec, ep14, ep15, ep16, ep17, ep18, ep19, ep20, ep21,
+	ep6, ep7, ep8, ep9, ep10, ep11, ep12, ep13, ep, eby, ep10b;
+
+PROCEDURE ep14(WORD x; BYTE y; BYTE[4] z); FORWARD;
+PROCEDURE ep15(STATIC WORD x; BYTE y; BYTE[4] z); FORWARD;
+PROCEDURE ep16(WORD x; STATIC BYTE y; BYTE[4] z); FORWARD;
+PROCEDURE ep17(STATIC WORD x; STATIC BYTE y; BYTE[4] z); FORWARD;
+PROCEDURE ep18(WORD x; BYTE y; STATIC BYTE[4] z); FORWARD;
+PROCEDURE ep19(STATIC WORD x; BYTE y; STATIC BYTE[4] z); FORWARD;
+PROCEDURE ep20(WORD x; STATIC BYTE y; STATIC BYTE[4] z); FORWARD;
+PROCEDURE ep21(STATIC WORD x; STATIC BYTE y; STATIC BYTE[4] z); FORWARD;
+
+BYTE[4] ec;
+WORD	eb;
+
+PROCEDURE ep6(WORD xp; BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep6;
+
+PROCEDURE ep7(STATIC WORD xp; BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep7;
+
+PROCEDURE ep8(WORD xp; STATIC BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep8;
+
+PROCEDURE ep9(STATIC WORD xp; STATIC BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep9;
+
+PROCEDURE ep10(WORD xp; BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep10;
+
+PROCEDURE ep10b(WORD xp; BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[1] := xp^:[1] + y + z[0]:[2] - z[2]:[2]
+	END ep10b;
+
+BYTE	eby;
+
+PROCEDURE ep11(STATIC WORD xp; BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep11;
+
+PROCEDURE ep12(WORD xp; STATIC BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep12;
+
+PROCEDURE ep13(STATIC WORD xp; STATIC BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep13;
+
+PROCEDURE ep3(WORD x; BYTE y; BYTE[4] z);
+	BEGIN
+	ep14(x, 3, z);
+	ep15(x, 3, z);
+	ep16(x, 3, z);
+	ep17(x, 3, z);
+	ep18(x, 3, z);
+	ep19(x, 3, z);
+	ep20(x, 3, z);
+	ep21(x, 3, z)
+	END ep3;
+
+PROCEDURE ep4(WORD x; BYTE y; BYTE[4] z);
+	BEGIN
+	ep14(x, 13, ec);
+	ep15(x, 13, ec);
+	ep16(x, 13, ec);
+	ep17(x, 13, ec);
+	ep18(x, 13, ec);
+	ep19(x, 13, ec);
+	ep20(x, 13, ec);
+	ep21(x, 13, ec)
+	END ep4;
+
+PROCEDURE ep14(WORD xp; BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep14;
+
+PROCEDURE ep15(STATIC WORD xp; BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep15;
+
+PROCEDURE ep16(WORD xp; STATIC BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep16;
+
+PROCEDURE ep17(STATIC WORD xp; STATIC BYTE y; BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep17;
+
+PROCEDURE ep18(WORD xp; BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep18;
+
+PROCEDURE ep19(STATIC WORD xp; BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep19;
+
+PROCEDURE ep20(WORD xp; STATIC BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep20;
+
+PROCEDURE ep21(STATIC WORD xp; STATIC BYTE y; STATIC BYTE[4] z);
+	BEGIN
+	xp^:[2] := xp^:[2] + y + z[0]:[2] - z[2]:[2]
+	END ep21;
+
+PROCEDURE ep1(WORD x; BYTE y; BYTE[4] z);
+	BEGIN
+	ep6(x, 1, z);
+	ep7(x, 1, z);
+	ep8(x, 1, z);
+	ep9(x, 1, z);
+	ep10(x, 1, z);
+	ep11(x, 1, z);
+	ep12(x, 1, z);
+	ep13(x, 1, z);
+	END ep1;
+
+PROCEDURE ep2(WORD x; BYTE y; BYTE[4] z);
+	BEGIN
+	ep6(x, 7, ec);
+	ep7(x, 7, ec);
+	ep8(x, 7, ec);
+	ep9(x, 7, ec);
+	ep10(x, 7, ec);
+	ep11(x, 7, ec);
+	ep12(x, 7, ec);
+	ep13(x, 7, ec)
+	END ep2;
+
+PROCEDURE ep(WORD x; BYTE y; BYTE[4] z);
+	BEGIN
+	ep1(x, y, z);
+	ep2(x, y, z);
+	ep3(x, y, z);
+	ep4(x, y, z)
+	END ep;
+
+WORD ea;
+
+.

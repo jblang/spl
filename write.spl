@@ -1,0 +1,535 @@
+PROGRAM Write;
+
+{	Version history
+	- 01-Mar-2008, P. Schorn, fixed leading space feature
+	- 30-Dec-2007, P. Schorn, replaced list output by port output
+	- 17-Dec-2006, P. Schorn, added T switch
+	- 03-Dec-2006, P. Schorn, added wild card functionality
+				  added path separator check
+	- 05-Nov-2006, P. Schorn, print CR after attaching PTP
+	- 30-Oct-2006, P. Schorn, added heuristic to detect binary files
+	- 30-Oct-2006, P. Schorn, added heuristic to detect binary files
+	- 01-Aug-2004, P. Schorn, included some optimizations
+	- 02-Jul-2004, P. Schorn, changed standard procedures
+	- 26-Apr-2002, P. Schorn, send output to list device instead of
+					punch
+	- 30-Mar-2002, P. Schorn, cleaned up data types
+	- 24-Mar-2002, P. Schorn, added force Z80 CPU
+	- 23-Mar-2002, P. Schorn, fixed bug in test for file exists
+	- 18-Mar-2002, P. Schorn, added flag for binary transfer
+	- 16-Mar-2002, P. Schorn, initial version
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE INPORT(WORD port);		EXTERNAL;
+PROCEDURE OUTPOR(WORD port, data);	EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+
+CONST	commandLineAddress		= 80h;
+	FCBLength			= 36; { allow random access }
+	printCharCmd			= 02h;
+	listOutputCmd			= 05h;
+	printStringCmd			= 09h;
+	versionNumberCmd		= 0ch;
+	getHostOSPathSeparatorSIMHCmd	= 28;
+	openFileCmd			= 0fh;
+	searchForFirstCmd		= 11h;
+	searchForNextCmd		= 12h;
+	readSequentialCmd		= 14h;
+	setDMAAdressCmd			= 1ah;
+
+	cr				= 13;
+	lf				= 10;
+	crlf				= cr + 256 * lf;
+	eof				= 1ah;
+	statusPort			= 12h;
+	dataPort			= 13h;
+	canWriteMask			= 02h;
+	SIMHPort			= 0feh;
+	attachPTP			= 16;
+	detachPTP			= 17;
+	getVersionSIMHCmd		= 6;
+	resetSIMHInterfaceCmd		= 14;
+	recordSize			= 128;
+	noError				= 0;
+	true				= 1;
+	false				= 0;
+	fileNotFound			= 255;
+	safetyMargin			= 256;
+	fileNameLength			= 8;
+	extensionLength			= 3;
+	fullFilenameLength		= fileNameLength + extensionLength;
+
+{
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|DR|F1|F2|//|F8|T1|T2|T3|EX|S1|S2|RC|DO|//|DN|CR|R0|R1|R2|
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ 00 01 02 .. 08 09 10 11 12 13 14 15 16 .. 31 32 33 34 35
+}
+
+BYTE 	commandLine	AT commandLineAddress;
+	pathSeparator	= ':':[1];
+	usage		= (
+'Usage: WRITE <file name> [B|T]',				crlf,
+'Copy <file name> to host environment. ',
+'Default is text, B for binary, T for Text',
+								crlf, crlf,
+'Examples',							crlf,
+'WRITE BDOS.MAC      copy BDOS.MAC as text file',		crlf,
+'WRITE PIP.COM B     copy PIP.COM as binary file',		crlf,
+'WRITE PIP.COM       copy PIP.COM as binary file [.COM .REL .DAT imply B]',
+								crlf,
+'WRITE TEST.DAT T    copy TEST.DAT as text file',		crlf,
+'WRITE *.COM         copy all files matching *.COM as binary files', crlf,
+'WRITE SRC/BDOS.MAC  copy BDOS.MAC to directory SRC as a text file', crlf,
+'WRITE COM/*.COM B   copy *.COM to directory COM as binary files', crlf,
+	'$':[1]);
+
+BYTE[recordSize]	buffer	= (
+	crlf, crlf, 'For SIMH. Copyright 2008 by Peter Schorn,',
+	' peter.schorn@acm.org', crlf, crlf, eof:[1]);
+BYTE[FCBLength]	defaultFCB;
+BYTE	done			= ('kB written ($');
+	doneBinary		= ('Binary).', crlf, '$':[1]);
+	doneText		= ('Text).', crlf, '$':[1]);
+	signon			= (crlf, 'WRITE V-1.17 (01-Mar-08)',
+				'  SIMH Interface V');
+	SIMHVersion		= ('XXX', crlf, '$':[1]);
+	fileDoesNotExist	= ('File does not exist.', crlf, '$':[1]);
+	couldNotCreateFile	= (cr:[1], 'Could not create file.',
+					crlf, '$':[1]);
+	simhrequired		= ('SIMH required.');
+	{ must be followed by crlfString }
+	crlfString		= (crlf, '$':[1]);
+	size0 = (        '$':[1], 0:[4]);
+	{ all sizeX entries use the same number of bytes }
+	size1 = ('.125', '$':[1]);
+	size2 = ('.25',  '$':[1], 0:[1]);
+	size3 = ('.375', '$':[1]);
+	size4 = ('.5',   '$':[1], 0:[2]);
+	size5 = ('.625', '$':[1]);
+	size6 = ('.75',  '$':[1], 0:[1]);
+	size7 = ('.875', '$':[1]);
+	switchToBinary = (cr:[1], 'Switched to binary mode.', crlf, '$':[1]);
+	warnNonASCII = (cr:[1], 'End Of File (0x1A) not in last record',
+			' - maybe a binary file.', crlf, '$':[1]);
+	write1 = ('Write "$');
+	write2 = ('" to "$');
+	write3 = ('".', crlf, '$':[1]);
+	outOfMemory1 = ('Too many files selected [$');
+	outOfMemory2 = ('].', crlf, '$':[1]);
+	noMatch = ('No file matches "$');
+	exception = ('COMRELDAT', 0:[1]);
+WORD	cpmResult, recordCount, topName, currentName;
+BYTE	byteCount, isText, forceIsText, s1, s2, s3, s4,
+	drive, hasWildCard, startName;
+
+PROCEDURE getTopLimit(WORD x);
+	BEGIN
+	RETURN @x - safetyMargin
+	END getTopLimit;
+
+PROCEDURE CPM2(WORD function, input);
+	BEGIN
+	cpmResult := BDOS(function:[1], input) AND 0FFH
+	END CPM2;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	CPM2(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	CPM2(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printUnsignedInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printUnsignedInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printUnsignedInt;
+
+{
+PROCEDURE printCPMResult(WORD char);
+	STATIC WORD old;
+	BEGIN
+	old := cpmResult;
+	printChar(char);
+	printUnsignedInt(old);
+	printChar(char);
+	cpmResult := old
+	END printCPMResult;
+}
+
+PROCEDURE outChar(WORD char);
+	BEGIN
+	IF	(s2 <> fileNameLength + 1) OR (commandLine[s1 - 1]:[1] = '.')
+	THEN	defaultFCB[s2]:[1] := char:[1];
+		s2 := s2 + 1
+	ENDIF
+	END outChar;
+
+PROCEDURE outCharS4;
+	BEGIN
+	outChar(s4)
+	END outCharS4;
+
+PROCEDURE outCharS3;
+	BEGIN
+	outChar(s3);
+	s1 := s1 + 1
+	END outCharS3;
+
+PROCEDURE inport;
+	BEGIN
+	RETURN INPORT(SIMHPort)
+	END inport;
+
+PROCEDURE printDefaultFCB;
+	BEGIN
+	IF	defaultFCB[0]:[1] >> 0
+	THEN	printChar(defaultFCB[0]:[1] + ('A' - 1));
+		printChar(':')
+	ENDIF;
+	s1 := 1;
+	WHILE s1 << fullFilenameLength + 1 DO
+		IF	defaultFCB[s1]:[1] <> ' '
+		THEN	printChar(defaultFCB[s1]:[1])
+		ENDIF;
+		IF	(s1 = fileNameLength) AND
+			(defaultFCB[fileNameLength + 1]:[1] <> ' ')
+		THEN	printChar('.')
+		ENDIF;
+		s1 := s1 + 1
+	ENDWHILE
+	END printDefaultFCB;
+
+PROCEDURE writeFile;
+	LABEL	showWritten;
+
+	BEGIN
+	defaultFCB[0]:[1] := drive;
+	printString(@write1);
+	printDefaultFCB;
+	printString(@write2);
+	s1 := 2;
+	WHILE s1 <<= commandLine[0]:[1] DO
+		printChar(commandLine[s1]:[1]);
+		s1 := s1 + 1
+	ENDWHILE;
+	printString(@write3);
+
+	IF	(isText <> false) AND (forceIsText = false)
+	THEN	s1 := 0;
+		WHILE	exception[s1]:[1] >> 0 DO
+			IF	(defaultFCB[fullFilenameLength-2]:[1] =
+					exception[s1]:[1]) AND
+				(defaultFCB[fullFilenameLength-1]:[1] =
+					exception[s1 + 1]:[1]) AND
+				(defaultFCB[fullFilenameLength-0]:[1] =
+					exception[s1 + 2]:[1])
+			THEN	isText := false;
+				printString(@switchToBinary);
+				EXIT
+			ENDIF;
+			s1 := s1 + 3
+		ENDWHILE
+	ENDIF;
+
+	buffer:[recordSize] := commandLine:[128]; { save command line }
+	CPM2(openFileCmd, @defaultFCB);
+	IF	cpmResult = fileNotFound
+	THEN	printString(@fileDoesNotExist);
+		STPSUB;
+		HALT
+	ENDIF;
+	commandLine:[recordSize] := buffer:[128]; { restore command line }
+	OUTPOR(SIMHPort, attachPTP);
+	{ attach PTP to the external file with the same name }
+	IF	inport <> noError
+	THEN	printString(@couldNotCreateFile);
+		STPSUB;
+		HALT
+	ENDIF;
+	recordCount := 0;
+	printChar(cr);
+
+	LOOP	CPM2(setDMAAdressCmd, @buffer);
+		CPM2(readSequentialCmd, @defaultFCB);
+		IF	cpmResult <> noError
+		THEN	EXIT
+		ENDIF;
+		recordCount := recordCount + 1;
+		byteCount := 0;
+		WHILE byteCount << recordSize DO
+			s1 := buffer[byteCount]:[1];
+			IF	(isText <> false) AND (s1 = eof)
+			THEN	IF	byteCount = 0
+				THEN	recordCount := recordCount - 1
+				ENDIF;
+				CPM2(readSequentialCmd, @defaultFCB);
+				IF	cpmResult = noError
+				THEN	printString(@warnNonASCII)
+				ENDIF;
+				GOTO showWritten
+			ENDIF;
+			{ write directly to PTR port in case list device is
+			mapped in CP/M }
+			WHILE INPORT(statusPort) AND canWriteMask = 0 DO
+			ENDWHILE;
+			OUTPOR(dataPort, buffer[byteCount]:[1]);
+			byteCount := byteCount + 1
+		ENDWHILE
+	ENDLOOP;
+
+	showWritten:
+	printUnsignedInt(recordCount DIV 8);
+	printString(@size0 + (@size1 - @size0) * (recordCount MOD 8));
+	printString(@done);
+	IF	isText = false
+	THEN	printString(@doneBinary)
+	ELSE	printString(@doneText)
+	ENDIF;
+	OUTPOR(SIMHPort, detachPTP)
+	END writeFile;
+
+PROCEDURE clearDefaultFCB;
+	BEGIN
+	defaultFCB := 0
+	END clearDefaultFCB;
+
+PROCEDURE removeTrailingSpaces;
+	BEGIN
+	WHILE (commandLine[0]:[1] >> 0) AND
+			(commandLine[commandLine[0]:[1]]:[1] = ' ') DO
+		commandLine[0]:[1] := commandLine[0]:[1] - 1
+	ENDWHILE
+	END removeTrailingSpaces;
+
+PROCEDURE shiftCommandLineLeft;
+	BEGIN
+	s1 := 2;
+	WHILE s1 <<= commandLine[0]:[1] DO
+		commandLine[s1]:[1] := commandLine[s1 + 1]:[1];
+		s1 := s1 + 1
+	ENDWHILE;
+	commandLine[0]:[1] := commandLine[0]:[1] - 1
+	END shiftCommandLineLeft;
+
+LABEL	finis;
+
+BEGIN
+s1 := 128;
+WHILE s1 >> 0 DO
+	OUTPOR(SIMHPort, resetSIMHInterfaceCmd);
+	s1 := s1 - 1
+ENDWHILE;
+
+OUTPOR(SIMHPort, getVersionSIMHCmd);
+buffer[0]:[2] := inport + 256 * inport;
+buffer[2]:[2] := inport + 256 * inport;
+IF	buffer:[4] = simhrequired:[4]
+	{ obtain three characters of version }
+THEN	SIMHVersion[0]:[2] := inport + 256 * inport;
+	SIMHVersion[2]:[1] := inport;
+	REPEAT
+	UNTIL	inport = 0
+ELSE	printString(@simhrequired);
+	STPSUB;
+	EXIT { no SIMH, terminate program }
+ENDIF;
+printString(@signon);
+
+removeTrailingSpaces;
+WHILE (commandLine[0]:[1] >>= 2) AND (commandLine[2]:[1] = ' ') DO
+	shiftCommandLineLeft
+ENDWHILE;
+
+IF	(commandLine[2]:[2] = 'W ') OR (commandLine[2]:[2] = 'W')
+THEN	shiftCommandLineLeft;
+	shiftCommandLineLeft
+ENDIF;
+
+{ Determine path separator }
+OUTPOR(SIMHPort, getHostOSPathSeparatorSIMHCmd);
+s1 := inport;
+IF	s1 <> 0
+THEN	pathSeparator := s1;
+	recordCount := @usage;
+	WHILE recordCount^:[1] <> '$' DO
+		IF	recordCount^:[1] = '/'
+		THEN	recordCount^:[1] := pathSeparator:[1]
+		ENDIF;
+		recordCount := recordCount + 1
+	ENDWHILE
+ENDIF;
+
+IF	commandLine[0]:[1] = 0
+THEN	printString(@usage);
+	STPSUB;
+	EXIT
+ENDIF;
+
+forceIsText := false;
+isText := true;
+IF	(commandLine[0]:[1] >>= 4) AND
+		(commandLine[commandLine[0]:[1] - 1]:[1] = ' ')
+THEN	IF	commandLine[commandLine[0]:[1]]:[1] = 'B'
+	THEN	commandLine[commandLine[0]:[1]]:[1] := ' '; { remove 'B' }
+		isText := false
+	ELSIF	commandLine[commandLine[0]:[1]]:[1] = 'T'
+	THEN	commandLine[commandLine[0]:[1]]:[1] := ' '; { remove 'T' }
+		forceIsText := true
+	ENDIF
+ENDIF;
+removeTrailingSpaces; { including switches 'B' and 'T' }
+
+drive := 0; { currently logged drive is default }
+clearDefaultFCB;
+
+CPM2(versionNumberCmd, 0);
+{ CP/M 3 treats command lines which start with ':' special }
+IF	(cpmResult >>= 30h) AND (commandLine[1]:[1] = ':')
+THEN	s1 := commandLine[0]:[1];
+	WHILE s1 >> 0 DO { shift command line right by one position }
+		commandLine[s1 + 1]:[1] := commandLine[s1]:[1];
+		s1 := s1 - 1
+	ENDWHILE;
+	commandLine[1]:[1] := ' '; { first character should be ' ' as before }
+	commandLine[0]:[1] := commandLine[0]:[1] + 1
+ENDIF;
+
+{ check whether any path separator in the file name }
+s1 := commandLine[0]:[1];	{ s1 >= 2 }
+IF	(commandLine[s1]:[1] = pathSeparator) OR (commandLine[s1]:[1] = ':')
+THEN	printString(@usage);
+	STPSUB;
+	EXIT
+ENDIF;
+LOOP
+	IF	commandLine[s1]:[1] = pathSeparator
+	THEN	s1 := s1 + 1;
+		EXIT
+	ENDIF;
+	IF	s1 = 2
+	THEN	EXIT
+	ENDIF;
+	IF	(s1 = 4) AND (commandLine[3]:[1] = ':')
+	THEN	s1 := 2;
+		EXIT
+	ENDIF;
+	s1 := s1 - 1
+ENDLOOP;
+IF	commandLine[s1 + 1]:[1] = ':'
+THEN	IF	('A' <<= commandLine[s1]:[1]) AND
+		(commandLine[s1]:[1] << ('Z' + 1))
+	THEN	drive := commandLine[s1]:[1] + (1 - 'A')
+	ENDIF;
+	s2 := s1 + 2;	{ remove drive letter from path }
+	REPEAT
+		commandLine[s2 - 2]:[1] := commandLine[s2]:[1];
+		s2 := s2 + 1
+	UNTIL	s2 >> commandLine[0]:[1];
+	commandLine[0]:[1] := commandLine[0]:[1] - 2
+ENDIF;
+commandLine[commandLine[0]:[1] + 1]:[1] := 0;
+{ Postcondition: s1 is index of first character of CP/M file name }
+startName := s1;
+defaultFCB[0]:[1] := drive;
+
+s2		:= 1;
+hasWildCard	:= 0;
+s4		:= ' ';
+WHILE s2 << fullFilenameLength + 1 DO
+	IF	s1 >> commandLine[0]:[1]
+	THEN	defaultFCB[s2]:[1] := s4;
+		s2 := s2 + 1;
+		IF	s2 = fileNameLength + 1
+		THEN	s4 := ' '
+		ENDIF
+	ELSE	s3 := commandLine[s1]:[1];
+		IF	s3 = '.'
+		THEN	IF	s2 << fileNameLength + 1
+			THEN	outCharS4
+			ELSE	s1 := s1 + 1;
+				s4 := ' '
+			ENDIF
+		ELSIF	s3 = '?'
+		THEN	hasWildCard := 1;
+			outCharS3
+		ELSIF	s3 = '*'
+		THEN	hasWildCard := 1;
+			s4 := '?';
+			outCharS4;
+			s1 := s1 + 1
+		ELSIF	s4 = '?'
+		THEN	outCharS4;
+			s1 := s1 + 1
+		ELSE	outCharS3
+		ENDIF
+	ENDIF
+ENDWHILE;
+
+IF	hasWildCard >> 0
+THEN	topName := LAST;
+	CPM2(setDMAAdressCmd, @buffer);
+	CPM2(searchForFirstCmd, @defaultFCB);
+	WHILE cpmResult <> fileNotFound DO
+		topName^:[fullFilenameLength] :=
+			buffer[32 * cpmResult + 1]:[fullFilenameLength];
+		topName := topName + fullFilenameLength;
+		IF	topName >> getTopLimit(0)
+		THEN	printString(@outOfMemory1);
+			printUnsignedInt(
+				(topName - LAST) DIV fullFilenameLength);
+			printString(@outOfMemory2);
+			GOTO finis
+		ENDIF;
+		CPM2(searchForNextCmd, 0)
+	ENDWHILE;
+
+	currentName := LAST;
+	IF	currentName = topName
+	THEN	printString(@noMatch);
+		printDefaultFCB;
+		printString(@write3)
+	ENDIF;
+	WHILE currentName << topName DO
+		clearDefaultFCB;
+		defaultFCB[1]:[fullFilenameLength] :=
+			currentName^:[fullFilenameLength];
+		currentName := currentName + fullFilenameLength;
+		s1 := startName;
+		s2 := 1;
+		WHILE s2 << fullFilenameLength + 1 DO
+			IF	s2 = fileNameLength + 1
+			THEN	commandLine[s1]:[1] := '.';
+				s1 := s1 + 1
+			ENDIF;
+			s3 := defaultFCB[s2]:[1];
+			IF	s3 <> ' '
+			THEN	commandLine[s1]:[1] := s3;
+				s1 := s1 + 1
+			ENDIF;
+			s2 := s2 + 1
+		ENDWHILE;
+		IF	commandLine[s1 - 1]:[1] = '.'
+		THEN	s1 := s1 - 1
+		ENDIF;
+		commandLine[s1]:[1] := 0;
+		commandLine[0] := s1 - 1;
+		writeFile
+	ENDWHILE
+ELSE	writeFile
+ENDIF;
+
+finis:
+
+END Write.
+

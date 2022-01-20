@@ -1,0 +1,11 @@
+	.Z80
+
+	ENTRY	.DSP
+
+;	Precondition: stack is: parameters, address to call, return address
+.DSP:	POP	HL
+	EX	(SP),HL
+	JP	(HL)
+
+	END
+

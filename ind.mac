@@ -1,0 +1,34 @@
+	.Z80
+
+	ENTRY	.IND
+
+; execute jump table
+; <DE> = negative value of minimal label in case statement
+; <HL> = case value
+; <BC> = number of entries in jump table minus one
+; on stack: address of else case, address of first table entry
+.IND:	ADD	HL,DE		; normalize case value with minimal label
+	BIT	7,H		; check sign of result
+	JR	NZ,ELSECA	; if negative, execute else case
+	EX	DE,HL		; <DE> := normalized case value
+	LD	L,C		; <HL> := (number of entries in jump table) - 1
+	LD	H,B		;	  i.e. the normalized maximum label
+	XOR	A		; clear carry flag
+	SBC	HL,DE		; compare number of table entries with
+				;	normalized case value
+	JR	C,ELSECA	; if case value too large, proceed to else case
+	POP	HL		; <HL> := address of first entry
+	ADD	HL,DE
+	ADD	HL,DE		; <HL> now points to jump target
+	LD	E,(HL)
+	INC	HL
+	LD	H,(HL)
+	LD	L,E		; <HL> := <HL>^
+	POP	DE		; junk address of else case
+	JP	(HL)		; proceed at jump target
+
+ELSECA:	POP	DE		; junk address of first table entry
+	RET			; proceed to else case
+
+	END
+

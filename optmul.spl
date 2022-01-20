@@ -1,0 +1,79 @@
+PROGRAM OptMul;
+
+{ Determines in which cases inlining the multiplication with a constant
+  is more code size efficient than calling the general purpose
+  multiplication routine.							}
+
+PROCEDURE BDOS(WORD function, input); EXTERNAL;
+
+CONST	{ BDOS function }
+	printCharCMD	= 2h;
+	cr		= 13;
+	lf		= 10;
+
+WORD	a, size;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCMD, char:[1])
+	END printChar;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printInt;
+
+PROCEDURE sizeConstMultiplication(WORD constant);
+	STATIC WORD ip, jp, size;
+
+	{ Precondition: <DE> contains original value of <HL>
+	  postcondition: emitted code multiplies <HL> by constant }
+	PROCEDURE constMultiplication(WORD constant);
+		BEGIN
+		IF	constant >> 1			{ I.e. not done yet	}
+		THEN	constMultiplication(constant DIV 2);
+			size := size + 1;		{ emitSimple0(dup2hl);	}
+			IF	constant AND 1 = 1
+			THEN	size := size + 1	{ emitSimple0(addhlde)	}
+			ENDIF
+		ENDIF
+		END constMultiplication;
+
+	BEGIN { sizeConstMultiplication }
+	ip := constant;
+	jp := ip;
+	WHILE ip AND 1 = 0 DO
+		ip := ip DIV 2
+	ENDWHILE;
+	IF	ip = 1		{ Constant is a power of two			}
+	THEN	size := 0;
+		WHILE jp >> 1 DO
+			size := size + 1; { emitSimple0(dup2hl);		}
+			jp := jp DIV 2
+		ENDWHILE
+	ELSE	size := 2;	{ emitSimple0(lddehl);				}
+				{ Only needed if constant is not a power of two	}
+		constMultiplication(jp)
+	ENDIF;
+	RETURN size
+	END sizeConstMultiplication;
+
+BEGIN { OptMul }
+a := 2;
+WHILE a << 1025 DO
+	size := sizeConstMultiplication(a);
+	IF	size << 6	{ cost of regular call to multiplication routine}
+	THEN	printInt(a);
+		printChar(':');
+		printInt(size);
+		printChar(cr);
+		printChar(lf)
+	ENDIF;
+	a := a + 1
+ENDWHILE
+END OptMul.
+

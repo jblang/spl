@@ -1,0 +1,260 @@
+PROGRAM formel;
+
+{	Version history
+	- 22-Mar-2015, P. Schorn, compatibility with new SPL compiler
+	- 07-Aug-2004, P. Schorn, added some more optimizations
+	- 31-Jul-2004, P. Schorn, added some optimizations
+	- 30-Mar-2002, P. Schorn, added hex numbers
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+
+CONST	bell			= 7;
+	tab			= 9;
+	cr			= 13;
+	lf			= 10;
+	eof			= 26;
+	crlf			= cr + 256 * lf;
+	commandLineAddress	= 80h;
+	false			= 0;
+	true			= 1;
+	printCharCmd		= 2h;
+	printStringCmd		= 9h;
+	readConsoleStringCmd	= 0ah;
+
+BYTE	signon		= (crlf,'FORMEL V-1.04 (07-Aug-04)', crlf,
+	'  Usage: Enter a formula using numbers (decimal and hex), ',
+	'parentheses', crlf, '  and the following operators:', crlf,
+	'  + - | (bitwise OR) * / ? (signed division ) % (modulo) & ',
+	'(bitwise AND) ~ (bitwise NOT)');
+	{ merge with next }
+	crlfString	= (crlf, '$':[1], eof:[1]);
+	equalsSpace	= ' ':[1]; { merge with next }
+	equals		= '= $';
+	mixed		= ' (decimal and hex numbers used)$';
+	numberIsHex, initialCommandLineLength, gotHex, gotDecimal, charIndex;
+	commandLine AT commandLineAddress;
+	commandLineLength AT commandLineAddress;
+	commandLineBufferSize AT commandLineAddress - 1;
+WORD	result, numberInBase10, numberInBase16, ch;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printUnsignedInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printUnsignedInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printUnsignedInt;
+
+PROCEDURE printHexByte(WORD theByte);
+	STATIC BYTE hexDigits = ('0123456789ABCDEF');
+	BEGIN
+	printChar(hexDigits[theByte:[1] DIV 16]:[1]);
+	printChar(hexDigits[theByte:[1] AND 15]:[1])
+	END printHexByte;
+
+PROCEDURE getch;
+	BEGIN
+	REPEAT
+		IF	charIndex <<= commandLineLength
+		THEN	ch := commandLine[charIndex]:[1];
+			charIndex := charIndex + 1
+		ELSE	ch := 0
+		ENDIF
+	UNTIL	(ch <> ' ') AND (ch <> tab);
+	IF	('a' <<= ch) AND (ch <<= 'z')
+	THEN	ch := ch + ('A' - 'a')
+	ENDIF
+	END getch;
+
+PROCEDURE expression;
+	WORD  leftAccumulator, rightValue;
+	BYTE  op;
+
+	PROCEDURE error(WORD ch);
+		BEGIN
+		printChar(ch:[1]);
+		printChar(bell)
+		END error;
+
+	PROCEDURE term;
+		WORD  leftAccumulator, rightValue;
+		BYTE  op;
+
+		PROCEDURE factor;
+			WORD result;
+
+			PROCEDURE processDigits;
+				BEGIN
+				LOOP	IF	('0' <<= ch) AND (ch <<= '9')
+					THEN	numberInBase10 :=
+							10 * numberInBase10 +
+							ch - '0';
+						numberInBase16 :=
+							16 * numberInBase16 +
+							ch - '0'
+					ELSIF	('A' <<= ch) AND (ch <<= 'F')
+					THEN	numberIsHex := true;
+						numberInBase16 :=
+							16 * numberInBase16 +
+							ch + 10 - 'A'
+					ELSIF	ch = 'H'
+					THEN	numberIsHex := true;
+						getch;
+						EXIT
+					ELSE	EXIT
+					ENDIF;
+					getch
+				ENDLOOP
+				END processDigits;
+
+			BEGIN { factor }
+			numberInBase10 := 0;
+			numberInBase16 := 0;
+			numberIsHex := false;
+			IF	('A' <<= ch) AND (ch <<= 'F')
+			THEN	processDigits;
+				gotHex := true;
+				result := numberInBase16
+			ELSIF	('0' <<= ch) AND (ch <<= '9')
+			THEN	processDigits;
+				IF	numberIsHex = false
+				THEN	result := numberInBase10;
+					IF	numberInBase10 >> 9
+					THEN	gotDecimal := true
+					ENDIF
+				ELSE	result := numberInBase16;
+					IF	numberInBase16 >> 9
+					THEN	gotHex := true
+					ENDIF
+				ENDIF
+			ELSIF	ch = '('
+			THEN	getch;
+				result := expression;
+				IF	ch = ')'
+				THEN	getch
+				ELSE	error(')')
+				ENDIF
+			ELSE	result := 0;
+				printChar(ch);
+				error('?')
+			ENDIF;
+			RETURN result
+			END factor;
+
+		BEGIN { term }
+		leftAccumulator := factor;
+		WHILE (ch = '*') OR (ch = '/') OR (ch = '%') OR
+				(ch = '&') OR (ch = '?') DO
+			op := ch;
+			getch;
+			rightValue := factor;
+			IF	op = '*'
+			THEN	leftAccumulator := leftAccumulator * rightValue
+			ELSIF	op = '&'
+			THEN	leftAccumulator :=
+					leftAccumulator AND rightValue
+			ELSE	IF	rightValue = 0
+				THEN	error('0')
+				ELSIF	op = '/'
+				THEN	leftAccumulator :=
+						leftAccumulator DIV rightValue
+				ELSIF	op = '%'
+				THEN	leftAccumulator :=
+						leftAccumulator MOD rightValue
+				ELSE	leftAccumulator :=
+						leftAccumulator / rightValue
+				{ op is guaranteed to be '?' in this case }
+				ENDIF
+			ENDIF
+		ENDWHILE;
+		RETURN leftAccumulator
+		END term;
+
+	BEGIN { expression }
+	op := ch;
+	IF	(ch = '+') OR (ch = '-') OR (ch = '~')
+	THEN	getch
+	ENDIF;
+	leftAccumulator := term;
+	IF	op = '-'
+	THEN	leftAccumulator := -leftAccumulator
+	ELSIF	op = '~'
+	THEN	leftAccumulator := -leftAccumulator - 1
+	ENDIF;
+	WHILE (ch = '-') OR (ch = '+') OR (ch = '|') DO
+		op := ch;
+		getch;
+		rightValue := term;
+		IF	op = '-'
+		THEN	leftAccumulator := leftAccumulator - rightValue
+		ELSIF	op = '+'
+		THEN	leftAccumulator := leftAccumulator + rightValue
+		ELSE	leftAccumulator := leftAccumulator OR rightValue
+			{ guaranteed to be '|' }
+		ENDIF
+	ENDWHILE;
+	RETURN leftAccumulator
+	END expression;
+
+PROCEDURE printLn;
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE printEqualsSpace;
+	BEGIN
+	printString(@equalsSpace)
+	END printEqualsSpace;
+
+BEGIN { formel }
+initialCommandLineLength := commandLineLength;
+IF	commandLineLength = 0
+THEN	printString(@signon)
+ENDIF;
+LOOP	gotHex		:= false;
+	gotDecimal	:= false;
+	IF	commandLineLength = 0
+	THEN	commandLineBufferSize := 128;
+		BDOS(readConsoleStringCmd, commandLineAddress - 1)
+	ENDIF;
+	charIndex := 1;
+	getch;
+	IF	(ch = '.') OR (ch = 0)
+	THEN	EXIT
+	ENDIF;
+	printLn;
+	result := expression;
+	printString(@equals);
+	IF	result < 0
+	THEN	printChar('-');
+		printUnsignedInt(-result);
+		printEqualsSpace
+	ENDIF;
+	printUnsignedInt(result);
+	printEqualsSpace;
+	printHexByte(result[1]:[1]);
+	printHexByte(result[0]:[1]);
+	printChar('H');
+	IF	(gotHex <> false) AND (gotDecimal <> false)
+	THEN	printString(@mixed)
+	ENDIF;
+	printLn;
+	commandLineLength := 0; { force read next time }
+	IF	(ch = '.') OR (initialCommandLineLength <> 0)
+	THEN	EXIT
+	ENDIF
+ENDLOOP
+END formel.
+

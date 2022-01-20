@@ -1,0 +1,37 @@
+	.Z80
+
+	ENTRY	.IGX, .IGE, .UGE, .UGX
+
+; comparison of <HL> and <DE> (16-bit signed and unsigned numbers)
+
+; carry is set iff <HL> > <DE> (16-bit signed numbers)
+; <DE> and <HL> are swapped
+.IGX:	EX	DE,HL
+
+; carry is set iff <DE> > <HL> (16-bit signed numbers)
+; <DE> and <HL> remain unchanged
+.IGE:	LD	A,H		; <A> := most significant byte of <HL>
+	XOR	D		; check whether sign bits are different
+	JP	M,DIFSGN	; yes, sign bits differ
+
+; carry is set iff <DE> > <HL> (16-bit unsigned numbers)
+; <DE> and <HL> remain unchanged
+.UGE:	XOR	A		; clear carry and clear <A> for SPL
+	PUSH	HL		; save <HL>
+	SBC	HL,DE		; compare values with same sign by subtracting
+	POP	HL		; restore <HL>
+	RET
+
+; carry is set iff <HL> > <DE> (16-bit unsigned numbers)
+; <DE> and <HL> are swapped
+.UGX:	EX	DE,HL
+	JR	.UGE
+
+DIFSGN:	XOR	A		; SPL expects cleared <A>
+	LD	B,D
+	SLA	B		; shift sign bit of <DE> into carry
+	CCF			; carry should be set iff <DE> > 0
+	RET
+
+	END
+

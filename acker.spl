@@ -1,0 +1,129 @@
+PROGRAM acker;
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	{ BDOS functions }
+	printCharCmd		= 02h;
+	printStringCmd		= 09h;
+	readConsoleStringCmd	= 0Ah;
+	commandLineAddress	= 80h;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	bell			= 7;
+
+BYTE	commandLine		AT commandLineAddress;
+	commandLineLength	AT commandLineAddress;
+	commandLineBufferSize	AT commandLineAddress - 1;
+	t1 = 'Please enter X and Y (0 0 to exit): $';
+	t2 = 'Ackermann($';
+	t3 = ', $';
+	t4 = (') = ', '$':[1]);
+WORD	charIndex = 1, ch = ' ', last, x, y, previousCommandLineLength;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	IF	int <<= 9
+	THEN	printChar(int + '0')
+	ELSE	printInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printInt;
+
+PROCEDURE printLn;
+	STATIC BYTE crlfString = (crlf, '$':[1]);
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE getch;
+	BEGIN
+	IF	commandLineLength = 0
+	THEN	commandLineBufferSize := 128;
+		BDOS(readConsoleStringCmd, commandLineAddress - 1);
+		charIndex := 1
+	ENDIF;
+	IF	charIndex <<= commandLineLength
+	THEN	ch := commandLine[charIndex]:[1];
+		charIndex := charIndex + 1
+	ELSE	ch := 0
+	ENDIF;
+	RETURN ch
+	END getch;
+
+PROCEDURE inputInt;
+	STATIC WORD result, sign;
+	BEGIN
+	result := 0;
+	sign := +1;
+	getch;
+	WHILE ch = ' ' DO
+		getch
+	ENDWHILE;
+	IF	ch = '-'
+	THEN	sign := -1;
+		getch
+	ENDIF;
+	WHILE	('0' <<= ch) AND (ch <<= '9') DO
+		result := 10 * result + ch - '0';
+		getch
+	ENDWHILE;
+	RETURN sign * result
+	END inputInt;
+
+PROCEDURE ackermann(WORD x, y);
+	STATIC BYTE stackOverflowText = (crlf,
+		'Stack Overflow - Exiting', crlf, '$':[1]);
+	BEGIN
+	IF	@y <<= last
+	THEN	printString(@stackOverflowText);
+		STPSUB;
+		HALT
+	ENDIF;
+	IF	x = 0
+	THEN	RETURN y + 1
+	ENDIF;
+	IF	y = 0
+	THEN	RETURN ackermann(x - 1, 1)
+	ENDIF;
+	RETURN ackermann(x - 1, ackermann(x, y - 1))
+	END ackermann;
+
+BEGIN { acker }
+last := LAST + 128;
+previousCommandLineLength := commandLineLength;
+REPEAT
+	IF	commandLineLength = 0
+	THEN	printString(@t1)
+	ENDIF;
+	x := inputInt;
+	y := inputInt;
+	printLn;
+	printString(@t2);
+	printInt(x);
+	printString(@t3);
+	printInt(y);
+	printString(@t4);
+	printInt(ackermann(x, y));
+	printChar(bell);
+	printLn;
+	IF	previousCommandLineLength <> 0
+	THEN	EXIT
+	ENDIF;
+	commandLineLength := 0
+UNTIL (x = 0) AND (y = 0)
+END acker.
+

@@ -1,0 +1,14 @@
+	.Z80
+
+	ENTRY	.BTI
+
+; convert a boolean to an integer
+; <HL> is set to 0 if carry flag is set, to 1 otherwise
+.BTI:	LD	H,A	; <HL> := 0
+	LD	L,A
+	RET	C	; done if carry set
+	INC	HL	; otherwise <HL> := 1
+	RET
+
+	END
+

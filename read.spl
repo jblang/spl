@@ -1,0 +1,528 @@
+PROGRAM Read;
+
+{	Version history
+	- 19-May-2014, P. Schorn, added filter for legal CP/M filename characters
+	- 12-Jun-2010, P. Schorn, fixed SIMH version check
+	- 01-Mar-2008, P. Schorn, fixed leading space feature
+	- 30-Dec-2007, P. Schorn, more robust for other BDOS impl.
+	- 03-Dec-2006, P. Schorn, dynamically determine path separator
+				  wild card support for UNIX and Windows
+	- 05-Nov-2006, P. Schorn, print CR after attaching PTR
+	- 15-Aug-2004, P. Schorn, added some more optimizations
+	- 31-Jul-2004, P. Schorn, added some optimizations
+	- 02-Jul-2004, P. Schorn, changed standard procedures
+	- 30-Mar-2002, P. Schorn, cleaned up data types
+	- 24-Mar-2002, P. Schorn, added force Z80 CPU
+	- 01-Mar-2002, P. Schorn, removed SIMH reset
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE INPORT(WORD port);		EXTERNAL;
+PROCEDURE OUTPOR(WORD port, data);	EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	commandLineAddress		= 80h;
+	FCBLength			= 36; { allow random access }
+	printCharCmd			= 2h;
+	printStringCmd			= 9h;
+	versionNumberCmd		= 0ch;
+	closeFileCmd			= 10h;
+	deleteFileCmd			= 13h;
+	writeSequentialCmd		= 15h;
+	makeFileCmd			= 16h;
+	setDMAAdressCmd			= 1ah;
+	cr				= 13;
+	lf				= 10;
+	crlf				= cr + 256 * lf;
+	eof				= 1ah;
+	statusPort			= 12h;
+	dataPort			= 13h;
+	SIMHPort			= 0feh;
+	resetPTR			= 3;
+	attachPTR			= 4;
+	detachPTR			= 5;
+	getVersionSIMHCmd		= 6;
+	resetSIMHInterfaceCmd		= 14;
+	getHostOSPathSeparatorSIMHCmd	= 28;
+	getHostFilenamesCmd		= 29;
+	cpmError			= 255;
+	recordSize			= 128;
+	noError				= 0;
+	directoryFullError		= 1;
+	diskFullError			= 2;
+	false				= 0;
+	true				= 1;
+	fileNameLength			= 8;
+	extensionLength			= 3;
+	fullFilenameLength		= fileNameLength + extensionLength;
+
+{
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|DR|F1|F2|//|F8|T1|T2|T3|EX|S1|S2|RC|DO|//|DN|CR|R0|R1|R2|
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ 00 01 02 .. 08 09 10 11 12 13 14 15 16 .. 31 32 33 34 35
+}
+
+BYTE 	commandLine	AT commandLineAddress;
+	pathSeparator	= '/':[1];
+	usage		= (
+'Usage: READ <file name> [L]',					crlf,
+'Binary copy <file name> from host environment. L = use lower case for name.',
+	crlf, crlf,
+'Examples',							crlf,
+'READ bdos.mac        copy BDOS.MAC to BDOS.MAC',		crlf,
+'READ bdos.mac L      copy bdos.mac to BDOS.MAC',		crlf,
+'READ *.mac           copy all files ending with .MAC',		crlf,
+'READ a:bdos.mac      copy BDOS.MAC to A:',			crlf,
+'READ a:*.com         copy all .COM files to A:',		crlf,
+'READ src/bdos.mac    copy SRC/BDOS.MAC to BDOS.MAC',		crlf,
+'READ src/a:bdos.mac  copy SRC/BDOS.MAC to BDOS.MAC on A:',	crlf,
+'READ src/*.mac       copy all .MAC files from directory SRC',	crlf,
+'READ src/*.MAC L     copy all .mac files from directory src',	crlf,
+'READ src/a:test.*    copy all TEST.* files from directory SRC to A:',	crlf,
+	'$':[1]);
+	s1, s2, s3, drive, fileHasBeenCreated, fileNeedsToBeClosed,
+	ch, hasWildCard;
+
+BYTE[FCBLength]	defaultFCB;
+BYTE[recordSize]	buffer = (
+	crlf, crlf, 'For SIMH. Copyright 2014 by Peter Schorn,',
+	' peter.schorn@acm.org', crlf, crlf, eof:[1]);
+BYTE	done			= ('kB written.',
+					crlf, '$':[1]);
+	signon			= (crlf,'READ V-2.25 (19-May-14)',
+					' SIMH Interface V');
+	SIMHVersion		= ('XXX', crlf, '$':[1]);
+	wrongVersion		= ('Need SIMH Interface V003 or above ',
+				   'for wild card support.', crlf, '$':[1]);
+	noOS9			= ('Macintosh OS 9 has no wild card support.',
+					 crlf, '$':[1]);
+	originalFileDeleted	= ('Previous file of same name deleted.',
+					crlf, '$':[1]);
+	noDirectorySpace	= ('No more directory space available.',
+					crlf, '$':[1]);
+	fileDoesNotExist	= ('File does not exist.',
+					crlf, '$':[1]);
+	fileIsEmpty		= ('File is empty.',
+					crlf, '$':[1]);
+	internalError		= ('Could not create directory entry.',
+					crlf, '$':[1]);
+	diskFull		= ('Disk full.',
+					crlf, '$':[1]);
+	read1			= ('Read from "', '$':[1]);
+	read2			= ('" and write to "', '$':[1]);
+	read3			= ('".', crlf, '$':[1]);
+	noMatch			= ('No file matches "$');
+	simhrequired		= ('SIMH required.');
+	{ must be followed by crlfString }
+	crlfString		= (crlf, '$':[1]);
+	size0 = (        '$':[1], 0:[4]);
+	{ all sizeX entries use the same number of bytes }
+	size1 = ('.125', '$':[1]);
+	size2 = ('.25',  '$':[1], 0:[1]);
+	size3 = ('.375', '$':[1]);
+	size4 = ('.5',   '$':[1], 0:[2]);
+	size5 = ('.625', '$':[1]);
+	size6 = ('.75',  '$':[1], 0:[1]);
+	size7 = ('.875', '$':[1]);
+	notLegal = ("<>.,;:=?*[]_%|()/\", 0:[1]);
+WORD	error, byteCount, recordCount;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printUnsignedInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printUnsignedInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printUnsignedInt;
+
+PROCEDURE writeBuffer;
+	BEGIN
+	error := noError;
+	recordCount := recordCount + 1;
+	IF	fileHasBeenCreated = false
+	THEN	fileHasBeenCreated := true;
+		IF	BDOS(deleteFileCmd, @defaultFCB) AND 0FFH <> cpmError
+		THEN	printString(@originalFileDeleted)
+		ENDIF;
+		IF	BDOS(makeFileCmd, @defaultFCB) AND 0FFH = cpmError
+		THEN	printString(@noDirectorySpace);
+			STPSUB;
+			error := directoryFullError;
+			EXIT
+		ENDIF;
+		fileNeedsToBeClosed := true;
+		BDOS(setDMAAdressCmd, @buffer)
+	ENDIF;
+	IF	BDOS(writeSequentialCmd, @defaultFCB) AND 0FFH <> 0
+	THEN	printString(@diskFull);
+		STPSUB;
+		error := diskFullError
+	ENDIF
+	END writeBuffer;
+
+PROCEDURE inport;
+	BEGIN
+	RETURN INPORT(SIMHPort)
+	END inport;
+
+PROCEDURE prepareCommandLine;
+	BEGIN
+	{ check whether any path separator in the file name }
+	s1 := commandLine[0]:[1];	{ s1 >= 2 }
+	IF	(commandLine[s1]:[1] = pathSeparator) OR
+		(commandLine[s1]:[1] = ':')
+	THEN	printString(@usage);
+		STPSUB;
+		HALT
+	ENDIF;
+	LOOP
+		IF	commandLine[s1]:[1] = pathSeparator
+		THEN	s1 := s1 + 1;
+			EXIT
+		ENDIF;
+		IF	s1 = 2
+		THEN	EXIT
+		ENDIF;
+		IF	(s1 = 4) AND (commandLine[3]:[1] = ':')
+		THEN	s1 := 2;
+			EXIT
+		ENDIF;
+		s1 := s1 - 1
+	ENDLOOP;
+	IF	commandLine[s1 + 1]:[1] = ':'
+	THEN	IF	('A' <<= commandLine[s1]:[1]) AND
+			(commandLine[s1]:[1] <<= 'P')
+		THEN	drive := commandLine[s1]:[1] + (1 - 'A')
+		ELSIF	('a' <<= commandLine[s1]:[1]) AND
+			(commandLine[s1]:[1] <<= 'p')
+		THEN	drive := commandLine[s1]:[1] + (1 - 'a')
+		ENDIF;
+		s2 := s1 + 2;	{ remove drive letter from path }
+		REPEAT
+			commandLine[s2 - 2]:[1] := commandLine[s2]:[1];
+			s2 := s2 + 1
+		UNTIL	s2 >> commandLine[0]:[1];
+		commandLine[0]:[1] := commandLine[0]:[1] - 2
+	ENDIF;
+	commandLine[commandLine[0]:[1] + 1]:[1] := 0
+	{ Postcondition: s1 is index of first character of CP/M file name }
+	END prepareCommandLine;
+
+PROCEDURE readFile;
+		
+	PROCEDURE characterIsLegal(WORD char);
+		STATIC WORD index;
+		BEGIN
+		index := @notLegal;
+		WHILE	index^:[1] >> 0 DO
+			IF	index^:[1] = char:[1]
+			THEN	RETURN	1
+			ENDIF;
+			index := index + 1
+		ENDWHILE;
+		RETURN	0
+		END characterIsLegal;
+
+	PROCEDURE outChar(WORD char);
+		BEGIN
+		IF	(s2 <> fileNameLength + 1) OR
+			(commandLine[s1 - 1]:[1] = '.')
+		THEN	IF	('a' <<= char:[1]) AND (char:[1] << ('z'+1))
+			THEN	char:[1] := char:[1] - ('a' - 'A')
+			ENDIF;
+			IF	characterIsLegal(char) = 0
+			THEN	defaultFCB[s2]:[1] := char:[1];
+				s2 := s2 + 1
+			ENDIF
+		ENDIF
+		END outChar;
+
+	LABEL	finisDetach, finisClose;
+
+	BEGIN { readFile }
+	OUTPOR(statusPort, resetPTR);
+	recordCount		:= 0;
+	byteCount		:= 0;
+	fileHasBeenCreated	:= false;
+	fileNeedsToBeClosed	:= false;
+	defaultFCB		:= 0;
+
+	prepareCommandLine;
+	defaultFCB[0]:[1] := drive;
+	s2 := 1;
+	WHILE s2 << fullFilenameLength + 1 DO
+		IF	s1 >> commandLine[0]:[1]
+		THEN	defaultFCB[s2]:[1] := ' ';
+			s2 := s2 + 1;
+		ELSE	s3 := commandLine[s1]:[1];
+			IF	s3 = '.'
+			THEN	IF	s2 << fileNameLength + 1
+				THEN	outChar(' ')
+				ELSE	s1 := s1 + 1
+				ENDIF
+			ELSE	outChar(s3);
+				s1 := s1 + 1
+			ENDIF
+		ENDIF
+	ENDWHILE;
+
+	printString(@read1);
+	s1 := 2;
+	WHILE	commandLine[s1]:[1] >> 0 DO
+		printChar(commandLine[s1]:[1]);
+		s1 := s1 + 1
+	ENDWHILE;
+
+	printString(@read2);
+	IF	defaultFCB[0]:[1] >> 0
+	THEN	printChar(defaultFCB[0]:[1] + ('A' - 1));
+		printChar(':')
+	ENDIF;
+	s1 := 1;
+	WHILE s1 << fullFilenameLength + 1 DO
+		IF	defaultFCB[s1]:[1] <> ' '
+		THEN	printChar(defaultFCB[s1]:[1])
+		ENDIF;
+		IF	(s1 = fileNameLength) AND
+			(defaultFCB[fileNameLength + 1]:[1] <> ' ')
+		THEN	printChar('.')
+		ENDIF;
+		s1 := s1 + 1
+	ENDWHILE;
+	printString(@read3);
+
+	{ attach PTR to the external file with the same name }
+	OUTPOR(SIMHPort, attachPTR);
+	printChar(cr);
+
+	LOOP	IF	(INPORT(statusPort) AND 1) = 0
+		{ file done, file not found or file empty }
+		THEN	IF	recordCount = 0
+			{ necessary for file not found or file empty}
+			THEN	IF	(byteCount = 1) AND (s2 = eof)
+				{ file empty }
+				THEN	printString(@fileIsEmpty);
+					STPSUB;
+					GOTO finisDetach
+				ENDIF;
+				IF	byteCount = 0 { file not found }
+				THEN	printString(@fileDoesNotExist);
+					STPSUB;
+					GOTO finisDetach
+				ENDIF
+			ENDIF;
+			EXIT
+		ENDIF;
+		buffer[byteCount]:[1] := INPORT(dataPort);
+		byteCount := byteCount + 1;
+		IF	byteCount = recordSize
+		THEN	byteCount := 0;
+			writeBuffer;
+			IF	error = directoryFullError
+			THEN	GOTO finisDetach
+			ENDIF;
+			IF	error = diskFullError
+			THEN	GOTO finisClose
+			ENDIF
+		ENDIF
+	ENDLOOP;
+
+	IF	byteCount >>= 2
+		{ last char was eof, do not create record full of eof }
+	THEN	WHILE byteCount << recordSize DO
+			buffer[byteCount]:[1] := eof;
+			byteCount := byteCount + 1
+		ENDWHILE;
+		writeBuffer;
+		IF	error = directoryFullError
+		THEN	GOTO finisDetach
+		ENDIF;
+		IF	error = diskFullError
+		THEN	GOTO finisClose
+		ENDIF
+	ENDIF;
+
+	printUnsignedInt(recordCount DIV 8);
+	printString(@size0 + (@size1 - @size0) * (recordCount MOD 8));
+	printString(@done);
+
+	finisClose:
+	IF	(fileNeedsToBeClosed <> false) AND
+		(BDOS(closeFileCmd, @defaultFCB) AND 0FFH = cpmError)
+	THEN	printString(@internalError);
+		STPSUB
+	ENDIF;
+
+	finisDetach:
+	OUTPOR(SIMHPort, detachPTR);
+
+	IF	(error = directoryFullError) OR (error = diskFullError)
+	THEN	HALT
+	ENDIF
+	END readFile;
+
+PROCEDURE getNextCH;
+	BEGIN
+	OUTPOR(SIMHPort, getHostFilenamesCmd);
+	ch := inport
+	END getNextCH;
+
+PROCEDURE removeTrailingSpace;
+	BEGIN
+	{ remove trailing spaces }
+	WHILE (commandLine[0]:[1] >> 0) AND
+			(commandLine[commandLine[0]:[1]]:[1] = ' ') DO
+		commandLine[0]:[1] := commandLine[0]:[1] - 1
+	ENDWHILE;
+	END removeTrailingSpace;
+
+PROCEDURE shiftCommandLineLeft;
+	BEGIN
+	s1 := 2;
+	WHILE s1 <<= commandLine[0]:[1] DO
+		commandLine[s1]:[1] := commandLine[s1 + 1]:[1];
+		s1 := s1 + 1
+	ENDWHILE;
+	commandLine[0]:[1] := commandLine[0]:[1] - 1
+	END shiftCommandLineLeft;
+
+BEGIN { Read }
+s1 := 128;
+WHILE s1 >> 0 DO
+	OUTPOR(SIMHPort, resetSIMHInterfaceCmd);
+	s1 := s1 - 1
+ENDWHILE;
+
+OUTPOR(SIMHPort, getVersionSIMHCmd);
+buffer[0]:[2] := inport + 256 * inport;
+buffer[2]:[2] := inport + 256 * inport;
+IF	buffer:[4] = simhrequired:[4]
+	{ obtain three characters of version }
+THEN	SIMHVersion[0]:[2] := inport + 256 * inport;
+	SIMHVersion[2]:[1] := inport;
+	REPEAT
+	UNTIL	inport = 0
+ELSE	printString(@simhrequired);
+	STPSUB;
+	EXIT	{ no SIMH, terminate program }
+ENDIF;
+printString(@signon);
+
+{ Determine path separator }
+OUTPOR(SIMHPort, getHostOSPathSeparatorSIMHCmd);
+s1 := INPORT(SIMHPort);
+IF	s1 <> 0
+THEN	pathSeparator := s1;
+	byteCount := @usage;
+	WHILE byteCount^:[1] <> '$' DO
+		IF	byteCount^:[1] = '/'
+		THEN	byteCount^:[1] := pathSeparator:[1]
+		ENDIF;
+		byteCount := byteCount + 1
+	ENDWHILE
+ENDIF;
+
+removeTrailingSpace;
+{ remove leading spaces }
+WHILE (commandLine[0]:[1] >>= 2) AND (commandLine[2]:[1] = ' ') DO
+	shiftCommandLineLeft
+ENDWHILE;
+
+IF	(commandLine[2]:[2] = 'R ') OR (commandLine[2]:[2] = 'R')
+THEN	shiftCommandLineLeft;
+	shiftCommandLineLeft
+ENDIF;
+
+IF	(commandLine[0]:[1] >>= 4) AND
+	(commandLine[commandLine[0]:[1]]:[1] = 'L') AND
+	(commandLine[commandLine[0]:[1] - 1]:[1] = ' ')
+THEN	commandLine[commandLine[0]:[1]]:[1] := ' ';
+	removeTrailingSpace;
+	s1 := 1;
+	WHILE s1 <<= commandLine[0]:[1] DO
+		IF	('A' <<= commandLine[s1]:[1]) AND
+			(commandLine[s1]:[1] << ('Z'+1))
+		THEN	commandLine[s1]:[1] := commandLine[s1]:[1] + ('a' - 'A')
+		ENDIF;
+		s1 := s1 + 1
+	ENDWHILE
+ENDIF;
+
+IF	commandLine[0]:[1] = 0
+THEN	printString(@usage);
+	STPSUB;
+	EXIT
+ENDIF;
+
+{ CP/M 3 treats command lines which start with ':' special }
+IF	(BDOS(versionNumberCmd, 0) >>= 30h) AND (commandLine[1]:[1] = ':')
+THEN	s1 := commandLine[0]:[1];
+	WHILE s1 >> 0 DO { shift command line right by one position }
+		commandLine[s1 + 1]:[1] := commandLine[s1]:[1];
+		s1 := s1 - 1
+	ENDWHILE;
+	commandLine[1]:[1] := ' '; { first character should be ' ' as before }
+	commandLine[0]:[1] := commandLine[0]:[1] + 1
+ENDIF;
+
+hasWildCard	:= 0;
+drive		:= 0;	{ currently logged drive is default }
+s1		:= 1;
+WHILE s1 <<= commandLine[0]:[1] DO
+	IF	(commandLine[s1]:[1] = '*') OR (commandLine[s1]:[1] = '?')
+	THEN	hasWildCard := 1;
+		EXIT
+	ENDIF;
+	s1 := s1 + 1
+ENDWHILE;
+
+IF	hasWildCard >> 0
+THEN	IF	pathSeparator = ':'
+	THEN	printString(@noOS9);
+		EXIT
+	ELSIF	SIMHVersion[2]:[1] << '3'
+	THEN	printString(@wrongVersion);
+		EXIT
+	ENDIF;
+	prepareCommandLine;
+	OUTPOR(SIMHPort, getHostFilenamesCmd);
+	getNextCH;
+	IF	ch >> 0
+	THEN	REPEAT
+			commandLine[1]:[1] := ' ';
+			s1 := 2;
+			REPEAT
+				commandLine[s1]:[1] := ch;
+				s1 := s1 + 1;
+				getNextCH
+			UNTIL ch = 0;
+			commandLine[0]:[1] := s1 - 1;
+			readFile;
+			getNextCH
+		UNTIL ch = 0
+	ELSE	printString(@noMatch);
+		s1 := 2;
+		WHILE s1 <<= commandLine[0]:[1] DO
+			printChar(commandLine[s1]:[1]);
+			s1 := s1 + 1
+		ENDWHILE;
+		printString(@read3)
+	ENDIF
+ELSE	readFile
+ENDIF
+
+END Read.
+

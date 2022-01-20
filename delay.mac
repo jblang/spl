@@ -1,0 +1,34 @@
+	.Z80
+
+; delay by executing a given number of t-states
+
+	ENTRY	DELAY
+
+P1	EQU	8
+P2	EQU	7
+P3	EQU	67
+
+; PROCEDURE DELAY(WORD x);EXTERNAL;
+; execute exactly 1000*x t-states
+DELAY:	POP	HL		; 10*1			  10
+	POP	DE		; 10*1			  20
+L1:	DEC	DE		;  6*x		   6*x +  20
+	LD	A,D		;  4*x		  10*x +  20
+	OR	E		;  4*x		  14*x +  20
+	JP	Z,L4		; 10*x		  24*x +  20
+	LD	B,P1		;  7*(x-1)	  31*x +  13
+L2:	LD	C,P2		;  7*8*(x-1)	  87*x -  43
+L3:	DEC	C		;  4*56*(x-1)	 311*x - 267
+	JP	NZ,L3		; 10*56*(x-1)	 871*x - 827
+	DEC	B		;  4*8*(x-1)	 903*x - 859
+	JP	NZ,L2		; 10*8*(x-1)	 983*x - 939
+	LD	A,0		;  7*(x-1)	 990*x - 946
+	JP	L1		; 10*(x-1)	1000*x - 956
+L4:	LD	A,P3		;  7*1		1000*x - 949
+L5:	DEC	A		;  4*67		1000*x - 681
+	JP	NZ,L5		; 10*67		1000*x -  11
+	LD	A,0		;  7*1		1000*x -   4
+	JP	(HL)		;  4*1		1000*x
+
+	END
+

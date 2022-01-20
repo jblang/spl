@@ -1,0 +1,5093 @@
+PROGRAM SPLCompiler;
+
+{	Copyright (c) 2004 - 2015, Peter Schorn
+
+	Permission is hereby granted, free of charge, to any person obtaining a
+	copy of this software and associated documentation files (the "Software"),
+	to deal in the Software without restriction, including without limitation
+	the rights to use, copy, modify, merge, publish, distribute, sublicense,
+	and/or sell copies of the Software, and to permit persons to whom the
+	Software is furnished to do so, subject to the following conditions:
+
+	The above copyright notice and this permission notice shall be included in
+	all copies or substantial portions of the Software.
+
+	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+	PETER SCHORN BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+	IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+	CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+	Except as contained in this notice, the name of Peter Schorn shall not
+	be used in advertising or otherwise to promote the sale, use or other dealings
+	in this Software without prior written authorization from Peter Schorn.
+}
+
+{ Tab stops 8 }
+
+{	Version history
+	22-Mar-2015, P. Schorn, made key word case insensitive
+	03-Dec-2006, P. Schorn, improved optimizations
+				include files can occur within comments
+					(simulate conditional compilation)
+				removed unused pophl instruction
+				various simplifications of runtime library
+				a one- or two-byte value can now be assigned
+					to a memory block (useful for initialization)
+	15-Aug-2004, P. Schorn, generalized pointer expressions by allowing array expressions
+	06-Aug-2004, P. Schorn, removed BDOSResult and BDOSSaveResult
+	28-Jul-2004, P. Schorn, first official release
+
+	Enabling and disabling code generation statistics
+	The compiler can produce a table showing for the generated code which
+	instruction was generated how often and how many bytes were consumed.
+
+	Switching this feature on and off is done by judiciously using two
+	include files and the fact that comments can be nested.
+
+  	Enabling statistics: Both STABEGIN.INC and STAEND.INC are empty.
+  	Disabling statistics: STABEGIN.INC contains a single opening curly bracket
+  		and STAEND.INC contains a single closing curly bracket.
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+
+CONST	{ File Control Block related constants }
+	defaultFCBAddress	= 5ch;
+	crPos			= 32;
+	commandLineAddress	= 80h;
+	FCBLength		= 36; { Allow random access }
+	recordSize		= 128;
+
+	lineLength		= 168; { Maximal length of an input line }
+	safetyMargin		= 256; { Halt the compiler if stack - heap <<= safetyMargin }
+
+	{ BDOS functions }
+	printCharCmd		= 02h;
+	printStringCmd		= 09h;
+	openFileCmd		= 0fh;
+	closeFileCmd		= 10h;
+	deleteFileCmd		= 13h;
+	readSequentialCmd	= 14h;
+	writeSequentialCmd	= 15h;
+	makeFileCmd		= 16h;
+	setDMAAddressCmd	= 1ah;
+	readRandomCmd		= 21h;
+
+	{ Return codes }
+	noError			= 0;
+	leastOKCode		= 3;
+	notFoundError		= 0ffh;
+	noDirectorySpaceError	= 0ffh;
+	false			= 0;
+	true			= 1;
+	nil			= 0;
+
+	{ Common characters }
+	tab			= 9;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	eof			= 1ah;
+
+	{ Misc constants }
+	lineNumberWidth		= 5; { Width for formatting line numbers					}
+	extraSpaces		= 1; { Number of spaces to print after line number				}
+
+	{ Code generation }
+	peepHoleBufferLength	= 100; { Number of pseudo instructions to be kept in peepHoleBuffer		}
+	maxAllowedOffset	= 127; { Largest possible offset relative to IX					}
+
+	{ Scanner and compiler symbols }
+	atSymbol = 0;
+	doSymbol;
+	elseSymbol;
+	elsifSymbol;
+	endSymbol;
+	exportSymbol;
+	externalSymbol;
+	forwardSymbol;
+
+	{ Constraint: rightRoundParenthesesSymbol..eofSymbol must be sequential					}
+	rightRoundParenthesesSymbol;
+	commaSymbol;
+
+	{ Constraint: eofSymbol..staticSymbol must be sequential in this order					}
+	eofSymbol;
+	labelSymbol;
+	semicolonSymbol;
+	constSymbol;
+	beginSymbol;
+	procedureSymbol;
+
+	{ Sub-Constraint: byteSymbol..staticSymbol must be sequential in this order				}
+	byteSymbol;
+	wordSymbol;
+	staticSymbol;
+
+	moduleSymbol;
+	notSymbol;
+	ofSymbol;
+	programSymbol;
+	thenSymbol;
+	untilSymbol;
+
+	{ Constraint: whileSymbol to continueSymbol should be sequential
+	  for more efficient CASE statement									}
+	whileSymbol;
+	gotoSymbol;
+	ifSymbol;
+	caseSymbol;
+	repeatSymbol;
+	loopSymbol;
+	exitSymbol;
+	returnSymbol;
+	continueSymbol;
+
+	{ Constraint: all comparison symbols must be sequential, lessUnsignedSymbol is first, equalSymbol last	}
+	lessUnsignedSymbol;
+	lessOrEqualUnsignedSymbol;
+	greaterUnsignedSymbol;
+	greaterOrEqualUnsignedSymbol;
+	lessSignedSymbol;
+	greaterSignedSymbol;
+	lessOrEqualSignedSymbol;
+	greaterOrEqualSignedSymbol;
+	notEqualSymbol;
+	equalSymbol;
+
+	{ Constraint: assignSymbol and leftRoundParenthesesSymbol follow immediately equalSymbol		}
+	assignSymbol;
+	leftRoundParenthesesSymbol;
+
+	{ Constraint: plusSymbol..orSymbol must be sequential							}
+	plusSymbol;
+	minusSymbol;
+	orSymbol;
+
+	{ Constraint: timesSymbol..andSymbol must be sequential and in same order as mulhlde..modhlde		}
+	timesSymbol;
+	divideSymbol;
+	divSymbol;
+	modSymbol;
+	andSymbol;
+
+	addressOfSymbol;
+	leftSquareParenthesesSymbol;
+	rightSquareParenthesesSymbol;
+	pointerSymbol;
+	colonSymbol;
+	rangeSymbol;
+	stringSymbol;
+	unsignedIntegerSymbol;
+	periodSymbol;
+	endcaseSymbol;
+	endloopSymbol;
+	endifSymbol;
+	endwhileSymbol;
+	unknownSymbol;
+
+	identifierSymbol; { Property: only identifiers to follow }
+	{ Procedure identifier symbols }
+	procedureIdentifierSymbol;
+	procedureNoStartYetIdentifierSymbol;
+
+	{ Constraint: forwardProcedureIdentifierSymbol..externalProcedureIdentifierSymbol			}
+	forwardProcedureIdentifierSymbol;
+	exportedForwardProcedureIdentifierSymbol;
+	externalProcedureIdentifierSymbol;
+
+	{ Variable identifier symbols }
+	localVariableIdentifierSymbol;
+
+	{ Constraint: globalAbsoluteVariableIdentifierSymbol..globalRelativeVariableIdentifierSymbol		}
+	globalAbsoluteVariableIdentifierSymbol;
+
+	{ Constraint: globalRelativeVariableIdentifierSymbol = localVariableIdentifierSymbol + 2		}
+	globalRelativeVariableIdentifierSymbol;
+	globalExternalVariableIdentifierSymbol;
+	parameterIdentifierSymbol;
+	staticParameterIdentifierSymbol;
+
+	{ Misc identifier symbols }
+	labelIdentifierSymbol;
+	constantIdentifierSymbol;
+	programOrModuleIdentifier;
+	exportedEntryIdentifierSymbol; { Constraint: must be last }
+
+	{ Offsets for symbol table data structure }
+	symbolTypeOffset		= 0;
+	valueOffset			= 1;
+	sizeOffset			= 3; { sizeOffset must follow immediately in layout }
+	nextEntryOffset			= 5;
+	nextEntryReservedOffset		= 1;
+	symbolStringOffset		= 7;
+	symbolStringReservedOffset	= 3;
+	symbolTableEntrySize		= symbolStringOffset;
+
+	{ Offsets for peep hole data structure }
+	instructionOffset	= 0;
+	addressOffset		= 1;
+
+	{ Pseudo code instructions }
+	nop			= 0;	{ Constraint: nop must be 0 }
+
+	{ Load instructions for <HL> register pair							}
+	{ Constraint: ldhlConst..ldhlConstLoc sequential and ldlhlIndConst..ldlIndConstLoc sequential	}
+	ldhlConst;		{ LD HL,Const or LD H,A|LD L,A if Const = 0	abs			}
+	ldhlConstRel;		{ LD HL,Const					rel			}
+	ldhlConstChain;		{ LD HL,Const					chain			}
+	ldhlConstLoc;		{ PUSH IX|POP BC|LD HL,Const|ADD HL,BC		abs			}
+				{ PUSH IX|POP HL					if Const = 0	}
+				{ PUSH IX|POP HL|INC HL					if Const = 1	}
+				{ PUSH IX|POP HL|INC HL|INC HL				if Const = 2	}
+				{ PUSH IX|POP HL|INC HL|INC HL|INC HL			if Const = 3	}
+	ldhlIndConst;		{ LD HL,(Const)					abs			}
+	ldhlIndConstRel;	{ LD HL,(Const)					rel			}
+	ldhlIndConstChain;	{ LD HL,(Const)					chain			}
+	ldhlIndConstLoc;	{ LD L,(IX+Const)|LD H,(IX+Const+1)		8-bit			}
+	{ Constraint: ldhlInd1Const..ldhlInd1ConstLoc sequential in this order				}
+	ldhlInd1Const;		{ LD HL,(Const)|LD H,A				abs			}
+	ldhlInd1ConstRel;	{ LD HL,(Const)|LD H,A				rel			}
+	ldhlInd1ConstChain;	{ LD HL,(Const)|LD H,A				chain			}
+	ldhlInd1ConstLoc;	{ LD L,(IX+Const)|LD H,A			8-bit			}
+
+	{ Load instructions for <DE> register pair, must have same order as for <HL> register pair	}
+	lddeConst;		{ LD DE,Const or LD D,A|LD E,A if Const = 0	abs			}
+	lddeConstRel;		{ LD DE,Const					rel			}
+	lddeConstChain;		{ LD DE,Const					chain			}
+	lddeConstLoc;		{ PUSH IX|EX (SP),HL|LD DE,Const|ADD HL,DE|				}
+				{ EX DE,HL|POP HL				abs			}
+				{ PUSH IX|POP DE					if Const = 0	}
+				{ PUSH IX|POP DE|INC DE					if Const = 1	}
+				{ PUSH IX|POP DE|INC DE|INC DE				if Const = 2	}
+				{ PUSH IX|POP DE|INC DE|INC DE|INC DE			if Const = 3	}
+				{ PUSH IX|POP DE|INC DE|INC DE|INC DE|INC DE		if Const = 4	}
+				{ PUSH IX|POP DE|INC DE|INC DE|INC DE|INC DE|INC DE	if Const = 5	}
+	lddeIndConst;		{ LD DE,(Const)					abs			}
+	lddeIndConstRel;	{ LD DE,(Const)					rel			}
+	lddeIndConstChain;	{ LD DE,(Const)					chain			}
+	lddeIndConstLoc;	{ LD E,(IX+Const)|LD D,(IX+Const+1)		8-bit			}
+	lddeInd1Const;		{ LD DE,(Const)|LD D,A				abs			}
+	lddeInd1ConstRel;	{ LD DE,(Const)|LD D,A				rel			}
+	lddeInd1ConstChain;	{ LD DE,(Const)|LD D,A				chain			}
+	lddeInd1ConstLoc;	{ LD E,(IX+Const)|LD D,A			8-bit			}
+
+	popde;			{ POP DE								}
+	pushhl;			{ PUSH HL								}
+	{ Constraint: derefhl1..neghl used sequentially							}
+	derefhl1;		{ LD L,(HL)|LD H,A							}
+	derefhl2;		{ LD B,(HL)|INC HL|LD H,(HL)|LD L,B					}
+	{ Constraint: addhlde to orhlde must be sequential						}
+	addhlde;		{ ADD HL,DE								}
+	subhlde;		{ XOR A|SBC HL,DE							}
+	{ Constraint: mulhlde..modhlde must be sequential and in same order as timesSymbol..modSymbol	}
+	mulhlde;		{ CALL .MUL								}
+	sdivhlde;		{ CALL .DIV								}
+	udivhlde;		{ CALL .WDV								}
+	modhlde;		{ CALL .MOD								}
+
+	{ orhlde must immediately follow andhlde to guarantee andhlConst - andhlde = orhlConst - orhlde	}
+	andhlde;		{ CALL .AND								}
+	orhlde;			{ CALL .IOR								}
+	neghl;			{ CALL .HCH								}
+
+	{ Constraint: following 2 instructions must be sequential in this order				}
+	store1;			{ LD (HL),E								}
+	store2;			{ LD (HL),E|INC HL|LD (HL),D						}
+	storen;			{ LD BC,Const|LDIR				abs			}
+	storenc;		{ LD BC,Const|CALL .STC				abs			}
+	exhlde;			{ EX DE,HL								}
+	inchl;			{ INC HL								}
+	dechl;			{ DEC HL								}
+
+	{ Constraint: order of the following 6 instructions must [1, 2] * [abs, rel, chain]		}
+	sthl1Const;		{ LD A,L|LD (Const),A|XOR A			abs			}
+	sthl2Const;		{ LD (Const),HL					abs			}
+	sthl1ConstRel;		{ LD A,L|LD (Const),A|XOR A			rel			}
+	sthl2ConstRel;		{ LD (Const),HL					rel			}
+	sthl1ConstChain;	{ LD A,L|LD (Const),A|XOR A			chain			}
+	sthl2ConstChain;	{ LD (Const),HL					chain			}
+
+	{ Constraint: following 2 instructions must be sequential in this order				}
+	sthl1ConstLoc;		{ LD (IX+Const),L				8-bit			}
+	sthl2ConstLoc;		{ LD (IX+Const),L|LD (IX+Const+1),H		8-bit			}
+
+	stInd1Const;		{ LD (HL),Const or LD (HL),A if Const=0		8-bit			}
+	stInd2Const;		{ LD (HL),C1|INC HL|LD (HL),C2			8-bit			}
+	div2hl;			{ SRL H|RR L								}
+	dup2hl;			{ ADD HL,HL								}
+	mul256;			{ LD H,L|LD L,A								}
+
+	{ orhlConst must immediately follow andhlConst to guarantee andhlConst-andhlde=orhlConst-orhlde	}
+	andhlConst;		{ LD H,A|LD A,L|AND Const|LD L,A|XOR A		8-bit			}
+	orhlConst;		{ LD A,L|OR Const|LD L,A|XOR A			8-bit			}
+	lddehl;			{ LD D,H|LD E,L								}
+	cmpeq;			{ CALL .IEQ								}
+	cmpneq;			{ CALL .INE								}
+	cmplt;			{ CALL .ILT								}
+	cmpge;			{ CALL .IGE								}
+	cmpuge;			{ CALL .UGE								}
+	cmpult;			{ CALL .ULT								}
+	cmpltx;			{ CALL .ILX								}
+	cmpgex;			{ CALL .IGX								}
+	cmpulx;			{ CALL .ULX								}
+	cmpugx;			{ CALL .UGX								}
+	cmpeq0hl;		{ CALL .E0H								}
+	cmpNeq;			{ LD BC,Const|CALL .NEQ							}
+	cmpNneq;		{ LD BC,Const|CALL .NNE							}
+	boolnot;		{ CCF									}
+	boolToInt;		{ CALL .BTI								}
+	jumpAbsTrue;		{ JP NC,Const					rel			}
+	jumpAbsFalse;		{ JP C,Const					rel			}
+	jumpAbs;		{ JP,Const					rel			}
+	labelDefinition;	{ Const = start of chain						}
+	sthl1Opt;		{ LD A,(HL)|LD (Const),A|XOR A			abs			}
+	sthl1OptRel;		{ LD A,(HL)|LD (Const),A|XOR A			rel			}
+	sthl1OptChain;		{ LD A,(HL)|LD (Const),A|XOR A			chain			}
+	loadElse;		{ LD DE,Const|PUSH DE				rel			}
+	ldbcConst;		{ LD BC,Const					abs			}
+	ldbConst;		{ LD B,Const								}
+	caseJump;		{ CALL .IND								}
+	jumpAbsOpt;		{ JP Const or JR Const				rel/abs			}
+	jumpAbsFalseOpt;	{ JP C,Const or JR C,Const			rel/abs			}
+	entryParNVar0;		{ CALL .EP0								}
+	entryParNVarM;		{ LD E,Const|CALL .EPV or LD DE,Const|CALL .EPX				}
+				{ Depending on size of Const (Const=-localVariableSize			}
+	returnPar0Var0;		{ RET									}
+	returnParNVar0;		{ LD E,Const|JP .RP0 or LD DE,Const|JP .RX0 (Const=parameterSize)	}
+	returnPar2Var0;		{ JP .R20		(2=parameterSize)				}
+	returnPar4Var0;		{ JP .R40		(4=parameterSize)				}
+	returnPar0VarM;		{ LD E,Const|JP .R0V or LD DE,Const|JP .R0X (Const=localVariableSize)	}
+	returnParNVarM;		{ LD DE,Const|JP .RPV	(Const=localVariableSize + 256 * parameterSize)	}
+	returnParXVarM;		{ LD DE,Const|JP .RXV	(Const=parameterSize)				}
+	pushn;			{ LD HL,-Const|ADD HL,SP|LD SP,HL|					}
+				{ EX DE,HL|LD BC,Const|LDIR			abs			}
+	push1;			{ LD H,L|PUSH HL|INC SP							}
+	callProc;		{ CALL Const					rel			}
+	callProcChain;		{ CALL Const					chain			}
+	setdefromhl;		{ EX DE,HL								}
+	pushaf;			{ PUSH AF								}
+	cmpbeq;			{ CALL .BEQ								}
+	cmpbne;			{ CALL .BNE								}
+	intToBool;		{ CALL .ITB								}
+	extopandpushhl;		{ EX (SP),HL|PUSH HL							}
+	dispatch;		{ CALL .DSP								}
+	inc1;			{ INC (HL)								}
+	dec1;			{ DEC (HL)								}
+	inc1l;			{ INC (IX+Const)				8-bit			}
+	dec1l;			{ DEC (IX+Const)				8-bit			}
+	ldind1hlconst;		{ LD (HL),Const or LD (HL),A if Const = 0	8-bit			}
+	ldind1hl0;		{ LD (Const),A					abs			}
+	ldind1hl0Rel;		{ LD (Const),A					rel			}
+	ldind1hl0Chain;		{ LD (Const),A					chain			}
+	lddeInd1ConstLoc1;	{ LD E,(IX+Const)				8-bit			}
+	numberOfInstructions;	{ must be last, is the number of pseudo instructions since nop = 0	}
+
+	maxRelativeJumpDistance	= 128 - 2;
+	caseSetupLength		= 15; { Standard length to set up for case statement }
+	anyTypeSize		= -1;
+	booleanTypeSize		= 0;
+	byteTypeSize		= 1;
+	wordTypeSize		= 2;
+
+BYTE	commandLine AT commandLineAddress;
+	usage			= ('usage: SPL filename[.x[y]] x=drive for .SPL y=drive for .REL',
+									crlf,	'$':[1]);
+	signon			= (crlf, 'SPL V-1.', {$ISPL.DAT} );
+	crlfString		= (					crlf,	'$':[1], eof:[1]);
+	fileNotFound		= ('Input file not found.',		crlf,	'$':[1]);
+	fileSystemFull		= ('File system full.',			crlf,	'$':[1]);
+	unexpectedError		= 'Unexpected BDOS error'; { Immediately followed by dotCRLFString }
+	dotCRLFString		= ('.':[1],				crlf,	'$':[1]);
+	noErrorsDetectedString	= ('No errors',					'$':[1]);
+	errorsDetectedString	= ('Errors = ',					'$':[1]);
+	generatedCodeString	= ('. Code = ',					'$':[1]);
+	freeMemoryString	= ('. Free memory = ',				'$':[1]);
+
+	{ Constraint: Must have same order as chain headers }
+	externalTable = (	'MUL', 'DIV', 'WDV', 'MOD', 'AND', 'IOR', 'HCH', 'IEQ',
+				'INE', 'ILT', 'IGE', 'UGE', 'ULT', 'ILX', 'IGX', 'ULX',
+				'UGX', 'E0H', 'NEQ', 'NNE', 'BTI', 'STA', 'FIN', 'IND',
+				'BEQ', 'BNE', 'ITB', 'EP0', 'EPV', 'RP0', 'R20', 'R40',
+				'R0V', 'RPV', 'EPX', 'RXV', 'RX0', 'R0X', 'STC', 'DSP');
+
+CONST	driveOffset		= 0;
+	typeOffset		= 9;
+	r0Offset		= 33;
+	maxFileNameLength	= 8 + 1 + 3; { Including "." }
+{	File Control Block definition
+	+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+	|DR|F1|F2|//|F8|T1|T2|T3|EX|S1|S2|RC|DO|//|DN|CR|R0|R1|R2|
+	+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+	 00 01 02 ...08 09 10 11 12 13 14 15 16 ...31 32 33 34 35
+
+	dr		drive code (0-16)
+			0 = use default drive for file
+			1 = auto disk select drive A,
+			2 = auto disk select drive B,
+			...
+			16 = auto disk select drive P.
+	f1 ... f8	contain the filename in ASCII upper-case, with high bit = 0
+	t1,t2,t3	contain the filetype in ASCII upper-case, with high bit = 0.
+			t1', t2', and t3' denote the bit of these positions,
+			t1' = 1 means Read-Only file,
+			t2' = 1 means SYS file, no DIR list
+	ex		contains the current extent number, normally set to 00 by the user,
+			but in range 0-31 during file I/O
+	s1		reserved for internal system use
+	s2		reserved for internal system use, set to zero on call to OPEN, MAKE, SEARCH
+	rc		record count for extent ex; takes on values from 0-127
+	d0 ... dn	filled in by CP/M; reserved for system use
+	cr		current record to read or write in a sequential file operation;
+			normally set to zero by user
+	r0,r1,r2	optional random record number in the range 0-65535, with overflow to r2,
+			r0, r1 constitute a 16-bit value with low byte r0, and high byte r1
+}
+BYTE[FCBLength]	defaultFCB AT defaultFCBAddress;
+BYTE[FCBLength]	errorFileFCB	= (1:[1], 'SPLERRORDAT',	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+{
+Content of symbol table for		 value					size
+procedureIdentifierSymbol		 start address (abs)			pointer to first parameter
+procedureNoStartYetIdentifierSymbol	 start address (chained)		pointer to first parameter
+forwardProcedureIdentifierSymbol	 start address (chained)		pointer to first parameter
+exportedForwardProcedureIdentifierSymbol start address (chained)		pointer to first parameter
+externalProcedureIdentifierSymbol	 start address (chained)		pointer to first parameter
+
+localVariableIdentifierSymbol		 offset (rel. to frame pointer)		size in bytes
+globalAbsoluteVariableIdentifierSymbol	 offset (abs)				size in bytes
+globalRelativeVariableIdentifierSymbol	 offset (rel. to load)			size in bytes
+globalExternalVariableIdentifierSymbol	 head of chain				size in bytes
+parameterIdentifierSymbol		 offset (rel. to frame pointer)		size in bytes
+staticParameterIdentifierSymbol		 offset (rel. to load)			size in bytes
+
+labelIdentifierSymbol			 address of label (rel. to load)	true
+labelIdentifierSymbol			 head of chain				false
+constantIdentifierSymbol		 value of constant			low : true iff being defined
+										high: true iff is relocatable
+programOrModuleIdentifier		 undefined				undefined
+exportedEntryIdentifierSymbol		 true iff entry address known		undefined
+}
+
+{			symbolType		nextEntry		symbolString		}
+BYTE	programEntry =	(programSymbol:[1],	nil:[2],		'PROGRAM',	0:[1]);
+	moduleEntry =	(moduleSymbol:[1],	@programEntry:[2],	'MODULE',	0:[1]);
+	exportEntry =	(exportSymbol:[1],	@moduleEntry:[2],	'EXPORT',	0:[1]);
+	forwardEntry =	(forwardSymbol:[1],	@exportEntry:[2],	'FORWARD',	0:[1]);
+	ofEntry =	(ofSymbol:[1],		@forwardEntry:[2],	'OF',		0:[1]);
+	atEntry =	(atSymbol:[1],		@ofEntry:[2],		'AT',		0:[1]);
+	staticEntry =	(staticSymbol:[1],	@atEntry:[2],		'STATIC',	0:[1]);
+	returnEntry =	(returnSymbol:[1],	@staticEntry:[2],	'RETURN',	0:[1]);
+	endcaseEntry =	(endcaseSymbol:[1],	@returnEntry:[2],	'ENDCASE',	0:[1]);
+	caseEntry =	(caseSymbol:[1],	@endcaseEntry:[2],	'CASE',		0:[1]);
+	divEntry =	(divSymbol:[1],		@caseEntry:[2],		'DIV',		0:[1]);
+	doEntry =	(doSymbol:[1],		@divEntry:[2],		'DO',		0:[1]);
+	continueEntry =	(continueSymbol:[1],	@doEntry:[2],		'CONTINUE',	0:[1]);
+	exitEntry =	(exitSymbol:[1],	@continueEntry:[2],	'EXIT',		0:[1]);
+	externalEntry =	(externalSymbol:[1],	@exitEntry:[2],		'EXTERNAL',	0:[1]);
+	gotoEntry =	(gotoSymbol:[1],	@externalEntry:[2],	'GOTO',		0:[1]);
+	labelEntry =	(labelSymbol:[1],	@gotoEntry:[2],		'LABEL',	0:[1]);
+	endloopEntry =	(endloopSymbol:[1],	@labelEntry:[2],	'ENDLOOP',	0:[1]);
+	loopEntry =	(loopSymbol:[1],	@endloopEntry:[2],	'LOOP',		0:[1]);
+	modEntry =	(modSymbol:[1],		@loopEntry:[2],		'MOD',		0:[1]);
+	notEntry =	(notSymbol:[1],		@modEntry:[2],		'NOT',		0:[1]);
+	orEntry =	(orSymbol:[1],		@notEntry:[2],		'OR',		0:[1]);
+	andEntry =	(andSymbol:[1],		@orEntry:[2],		'AND',		0:[1]);
+	procedureEntry =(procedureSymbol:[1],	@andEntry:[2],		'PROCEDURE',	0:[1]);
+	repeatEntry =	(repeatSymbol:[1],	@procedureEntry:[2],	'REPEAT',	0:[1]);
+	untilEntry =	(untilSymbol:[1],	@repeatEntry:[2],	'UNTIL',	0:[1]);
+	elsifEntry =	(elsifSymbol:[1],	@untilEntry:[2],	'ELSIF',	0:[1]);
+	elseEntry =	(elseSymbol:[1],	@elsifEntry:[2],	'ELSE',		0:[1]);
+	thenEntry =	(thenSymbol:[1],	@elseEntry:[2],		'THEN',		0:[1]);
+	endifEntry =	(endifSymbol:[1],	@thenEntry:[2],		'ENDIF',	0:[1]);
+	ifEntry =	(ifSymbol:[1],		@endifEntry:[2],	'IF',		0:[1]);
+	endwhileEntry =	(endwhileSymbol:[1],	@ifEntry:[2],		'ENDWHILE',	0:[1]);
+	whileEntry =	(whileSymbol:[1],	@endwhileEntry:[2],	'WHILE',	0:[1]);
+	constEntry =	(constSymbol:[1],	@whileEntry:[2],	'CONST',	0:[1]);
+	wordEntry =	(wordSymbol:[1],	@constEntry:[2],	'WORD',		0:[1]);
+	byteEntry =	(byteSymbol:[1],	@wordEntry:[2],		'BYTE',		0:[1]);
+	endEntry =	(endSymbol:[1],		@byteEntry:[2],		'END',		0:[1]);
+	beginEntry =	(beginSymbol:[1],	@endEntry:[2],		'BEGIN',	0:[1]);
+CONST	lastEntryP = @beginEntry;
+
+{ Constraint: relFileFCB must be first variable }
+BYTE[FCBLength]	relFileFCB	= (0, 0, 0, 0, 0, 0,		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+CONST endOfKeywordTableP = @relFileFCB;
+
+BYTE[recordSize] errorRecord	= 'Copyright (c) 2015, Peter Schorn, peter.schorn@acm.org';
+BYTE[recordSize] relFileRecord;
+BYTE[lineLength] lineBuffer;
+BYTE[3 * 2] peepHoleBufferTrailer = (nop:[1], 0:[2], nop:[1], 0:[2]);
+{ Guarantee that we always have two preceding instructions }
+BYTE[3 * peepHoleBufferLength] peepHoleBuffer;
+
+BYTE[FCBLength]	splFileFCB	= (0, 0, 0, 0, 0, 0,		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+BYTE[recordSize] inputRecord;
+WORD	ch,		{ Character to process			}
+	upch,		{ Character to process in upper case	}
+	lineNumber,	{ Current line number			}
+	pos;		{ Position in inputRecord		}
+
+CONST	inputStateSize = @pos - @splFileFCB + 2;
+BYTE[inputStateSize]	inputState;
+
+WORD	heap,				{ Pointer to first unused byte on the heap			}
+	freeMemory,			{ Smallest difference between heap and stack pointer detected	}
+
+	{ Scanner and symbol table related								}
+	symbol,				{ Current symbol returned by scanner				}
+	symbolStartP,			{ Pointer to start of current symbol				}
+	symbolEndP,			{ Pointer to end byte (= 0) of current symbol			}
+	symbolLength,			{ Length of the current symbol					}
+	symbolValue,			{ Numerical value of the current symbol				}
+	symbolEntryP,			{ Symbol table entry of found symbol, nil otherwise		}
+	symbolEntryValue,		{ If symbolEntryP <> nil: the value of the symbol		}
+	symbolEntrySize,		{ If symbolEntryP <> nil: the size of the symbol
+					  must follow immediately after symbolEntryValue		}
+	optimizedMultiplication,	{ Perform optimized code if multiplicand is
+					  constant and less than or equal to optimizedMultiplication	}
+	symbolTableP,			{ Start of symbol table						}
+	useNumericErrorMessages,	{ true iff error messages need to be displayed as numbers	}
+	lineBufferP,			{ Position in lineBuffer					}
+	isIncluding,			{ true iff currently an include file is open			}
+
+	{ REL file related										}
+	relFileBytePosition,		{ Byte position for rel file output				}
+	relFileBitPosition,		{ Bit counter 0..7						}
+	relFileByte,			{ Bits for rel file are accumulated here			}
+	programCounter,			{ Keeps track of emitted bytes					}
+	programCounter2,		{ programCounter - 2, set by flushPeepHoleBuffer		}
+	compilationUnitContainsCode,	{ true iff actual code or data bytes are emitted		}
+	startProgramCounter,		{ Start address of program					}
+
+	{ Parser related										}
+	currentTypeSymbol,		{ Store word or byte information				}
+	currentVariableP,		{ Points to current variable entry in symbol table		}
+	currentTypeSize,		{ Length of most recent type					}
+	currentConstantExpression,	{ Value of current constant expression				}
+	declarationLevel,		{ 0 = global, > 0 local						}
+	currentReturnLabelP,		{ Pointer to current label for returning from a procedure	}
+	currentInitializationLength,	{ Length of the current part of an initializer			}
+	globalScope,			{ Address of first global entry in symbol table			}
+	currentScope,			{ Currently active scope					}
+
+	{ Code generation related									}
+	instructionPointer,		{ Index into peepHoleBuffer					}
+	thisInstruction,
+	hlValueValid,			{ true or false							}
+	hlValue,			{ Value of HL register iff hlValueValid = true			}
+	ldhlInstruction,		{ Instruction which set HL, can be skipped if repeated		}
+	hlValueValid2,			{ true or false							}
+	hlValue2,			{ Value of HL register iff hlValueValid2 = true			}
+	ldhlInstruction2,		{ Instruction which can be skipped if it is repeated		}
+	deValueValid,			{ true or false							}
+	deValue,			{ Value of DE register iff deValueValid = true			}
+	lddeInstruction,		{ Instruction which set DE, can be skipped if repeated		}
+	currentInstructionOpCode,	{ Operation code of current instruction				}
+	currentInstructionAddress,
+
+	{ Constraint: must conform to externalTable							}
+	mulChainHeader,	{ .MUL }	{ Constraint: this is the first chain header, see below		}
+	divChainHeader, { .DIV }
+	wdvChainHeader, { .WDV }
+	modChainHeader, { .MOD }
+	andChainHeader, { .AND }
+	iorChainHeader, { .IOR }
+	hchChainHeader, { .HCH }
+	ieqChainHeader, { .IEQ }
+	ineChainHeader, { .INE }
+	iltChainHeader, { .ILT }
+	igeChainHeader, { .IGE }
+	ugeChainHeader, { .UGE }
+	ultChainHeader, { .ULT }
+	ilxChainHeader, { .ILX }
+	igxChainHeader, { .IGX }
+	ulxChainHeader, { .ULX }
+	ugxChainHeader, { .UGX }
+	e0hChainHeader, { .E0H }
+	neqChainHeader, { .NEQ }
+	nneChainHeader, { .NNE }
+	btiChainHeader, { .BTI }
+	staChainHeader, { .STA }
+	finChainHeader, { .FIN }
+	indChainHeader, { .IND }
+	beqChainHeader, { .BEQ }
+	bneChainHeader, { .BNE }
+	itbChainHeader, { .ITB }
+	ep0ChainHeader, { .EP0 }
+	epvChainHeader, { .EPV }
+	rp0ChainHeader, { .RP0 }
+	r20ChainHeader, { .R20 }
+	r40ChainHeader, { .R40 }
+	r0vChainHeader, { .R0V }
+	rpvChainHeader, { .RPV }
+	epxChainHeader, { .EPX }
+	rxvChainHeader, { .RXV }
+	rx0ChainHeader, { .RX0 }
+	r0xChainHeader, { .R0X }
+	stcChainHeader, { .STC }
+	dspChainHeader,	{ .DSP }	{ Constraint: this is the last chain header, see below		}
+
+	ch2, jp, kp, temp,		{ Temporary variables, overwritten by some procedure calls	}
+	previousErrorLine, totalErrors, ip;
+	{ Constraint: ip must be last variable }
+
+BYTE	cmpSwap = (
+	cmpltx:[1],	{ (cmplt,  CALL .ILT)	-> (cmpltx, CALL .ILX) }
+	cmpgex:[1],	{ (cmpge,  CALL .IGE)	-> (cmpgex, CALL .IGX) }
+	cmpugx:[1],	{ (cmpuge, CALL .UGE)	-> (cmpugx, CALL .UGX) }
+	cmpulx:[1],	{ (cmpult, CALL .ULT)	-> (cmpulx, CALL .ULX) }
+	cmplt:[1],	{ (cmpltx, CALL .ILX)	-> (cmplt,  CALL .ILT) }
+	cmpge:[1],	{ (cmpgex, CALL .IGX)	-> (cmpge,  CALL .IGE) }
+	cmpult:[1],	{ (cmpulx, CALL .ULX)	-> (cmpult, CALL .ULT) }
+	cmpuge:[1]	{ (cmpugx, CALL .UGX)	-> (cmpuge, CALL .UGE) });
+
+CONST	firstChainHeaderAddress	= @mulChainHeader;	{ Pointer to first byte of chain headers	}
+	lastChainHeaderAddress	= @dspChainHeader + 1;	{ Pointer to last byte of chain headers		}
+
+PROCEDURE checkHeap; FORWARD;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE spaces(WORD width);
+	BEGIN
+	WHILE width > 0 DO
+		printChar(' ');
+		width := width - 1
+	ENDWHILE
+	END spaces;
+
+PROCEDURE printIntWidth(WORD int, width);
+	BEGIN
+	IF	int <<= 9
+	THEN	spaces(width - 1);
+		printChar(int + '0')
+	ELSE	printIntWidth(int DIV 10, width - 1);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printIntWidth;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	printIntWidth(int, 0)
+	END printInt;
+
+PROCEDURE printLn;
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE getCharacter;
+	BEGIN
+	IF	ch = eof
+	THEN	EXIT
+	ENDIF;
+	IF	pos >>= recordSize
+	THEN	pos := 0;
+		BDOS(setDMAAddressCmd, @inputRecord);
+		IF	BDOS(readSequentialCmd, @splFileFCB) <> noError
+		THEN	inputRecord[0] := eof
+		ENDIF
+	ENDIF;
+	ch := inputRecord[pos]:[1];
+	upch := ch;
+	IF	('a' <<= ch) AND (ch <<= 'z')
+	THEN	upch := ch + ('A' - 'a')
+	ENDIF;
+	pos := pos + 1;
+	IF	(ch = eof) AND isIncluding
+	THEN	splFileFCB:[inputStateSize] := inputState:[inputStateSize];
+		isIncluding := false
+	ENDIF;
+	IF	ch = cr
+	THEN	lineNumber := lineNumber + 1
+	ENDIF;
+	IF	(ch = cr) OR (ch = lf) OR (lineBufferP >>= @lineBuffer + lineLength)
+	THEN	lineBufferP := @lineBuffer
+	ELSE	lineBufferP^:[1] := ch;
+		lineBufferP := lineBufferP + 1
+	ENDIF
+	END getCharacter;
+
+PROCEDURE enterSymbol(WORD kind);
+	BEGIN
+	heap^:[symbolTableEntrySize] := 0;
+	(heap+symbolTypeOffset)^:[1] := kind:[1];
+	(heap+nextEntryOffset )^:[2] := symbolTableP;
+	symbolTableP := heap;
+	symbolEntryP := heap;
+	heap := symbolEndP + 1;
+	checkHeap
+	END enterSymbol;
+
+PROCEDURE error(WORD errorNumber);
+	STATIC WORD ip;
+	BEGIN
+	totalErrors := totalErrors + 1;
+	IF	lineNumber <> previousErrorLine
+	THEN	previousErrorLine := lineNumber;
+		printIntWidth(lineNumber, lineNumberWidth);
+		spaces(extraSpaces);
+		ip := @lineBuffer;	{ Cannot replace by printString since line might contain '$' }
+		WHILE ip << lineBufferP DO
+			printChar(ip^:[1]);
+			ip := ip + 1
+		ENDWHILE;
+		printLn
+	ENDIF;
+	spaces(lineBufferP - (@lineBuffer - lineNumberWidth));
+	printChar('^');
+	IF	useNumericErrorMessages = false
+	THEN	BDOS(setDMAAddressCmd, @errorRecord);
+		errorFileFCB[r0Offset] := (errorNumber:[1] - 1) DIV 2;
+		IF	BDOS(readRandomCmd, @errorFileFCB) = noError
+		THEN	printString((@errorRecord + 64) + (-64)*(errorNumber:[1] AND 1))
+		ELSE	printInt(errorNumber:[1])
+		ENDIF
+	ELSE	printInt(errorNumber:[1])
+	ENDIF;
+	printLn
+	END error;
+
+{ The following error messages are used at least three times. Break-even is two uses:
+  Cost of two inline calls = 2 * (3/load number + 1/push + 3/call) = 14
+  Cost of procedure definition + 2 abbreviated calls =
+	(3/load number + 1/push + 3/call + 1/RET) + 2 * (3/call) = 14
+}
+PROCEDURE error05;
+	BEGIN
+	error(05) { Type mismatch }
+	END error05;
+
+PROCEDURE error10;
+	BEGIN
+	error(10) { Boolean expression expected }
+	END error10;
+
+PROCEDURE error31;
+	BEGIN
+	error(31) { Identifier expected }
+	END error31;
+
+PROCEDURE error54;
+	BEGIN
+	error(54); { Program too complex }
+	STPSUB;
+	HALT
+	END error54;
+
+PROCEDURE error71;
+	BEGIN
+	error(71) { Numerical value expected }
+	END error71;
+
+PROCEDURE error41;
+	BEGIN
+	error(41) { Identifier already declared }
+	END error41;
+
+PROCEDURE error94;
+	BEGIN
+	error(94) { Cannot export this kind of identifier }
+	END error94;
+
+PROCEDURE error97;
+	BEGIN
+	error(97) { Illegal use of @-operator in constant expression }
+	END error97;
+
+{ Enabling and disabling the statistics code is done by conditional compilation
+  To enable profiling (i.e. compiler will produce statistics about the generated code
+}
+{$ISTABEGIN.INC}
+CONST	translationTableEntrySize = 18;
+BYTE	translationTable = (
+{	'012345678912345678', '012345678912345678', '012345678912345678', '012345678912345678',}
+{ use grep patterns ",\r" -> ", " and "('.+?', '.+?', '.+?', '.+?',) " -> "\1\r" to maintain   }
+	'               nop', '         ldhlConst', '      ldhlConstRel', '    ldhlConstChain',
+	'      ldhlConstLoc', '      ldhlIndConst', '   ldhlIndConstRel', ' ldhlIndConstChain',
+	'   ldhlIndConstLoc', '     ldhlInd1Const', '  ldhlInd1ConstRel', 'ldhlInd1ConstChain',
+	'  ldhlInd1ConstLoc', '         lddeConst', '      lddeConstRel', '    lddeConstChain',
+	'      lddeConstLoc', '      lddeIndConst', '   lddeIndConstRel', ' lddeIndConstChain',
+	'   lddeIndConstLoc', '     lddeInd1Const', '  lddeInd1ConstRel', 'lddeInd1ConstChain',
+	'  lddeInd1ConstLoc', '             popde', '            pushhl', '          derefhl1',
+	'          derefhl2', '           addhlde', '           subhlde', '           mulhlde',
+	'          sdivhlde', '          udivhlde', '           modhlde', '           andhlde',
+	'            orhlde', '             neghl', '            store1', '            store2',
+	'            storen', '           storenc', '            exhlde', '             inchl',
+	'             dechl', '        sthl1Const', '        sthl2Const', '     sthl1ConstRel',
+	'     sthl2ConstRel', '   sthl1ConstChain', '   sthl2ConstChain', '     sthl1ConstLoc',
+	'     sthl2ConstLoc', '       stInd1Const', '       stInd2Const', '            div2hl',
+	'            dup2hl', '            mul256', '        andhlConst', '         orhlConst',
+	'            lddehl', '             cmpeq', '            cmpneq', '             cmplt',
+	'             cmpge', '            cmpuge', '            cmpult', '            cmpltx',
+	'            cmpgex', '            cmpulx', '            cmpugx', '          cmpeq0hl',
+	'            cmpNeq', '           cmpNneq', '           boolnot', '         boolToInt',
+	'       jumpAbsTrue', '      jumpAbsFalse', '           jumpAbs', '   labelDefinition',
+	'          sthl1Opt', '       sthl1OptRel', '     sthl1OptChain', '          loadElse',
+	'         ldbcConst', '          ldbConst', '          caseJump', '        jumpAbsOpt',
+	'   jumpAbsFalseOpt', '     entryParNVar0', '     entryParNVarM', '    returnPar0Var0',
+	'    returnParNVar0', '    returnPar2Var0', '    returnPar4Var0', '    returnPar0VarM',
+	'    returnParNVarM', '    returnParXVarM', '             pushn', '             push1',
+	'          callProc', '     callProcChain', '       setdefromhl', '            pushaf',
+	'            cmpbeq', '            cmpbne', '         intToBool', '    extopandpushhl',
+	'          dispatch', '              inc1', '              dec1', '             inc1l',
+	'             dec1l', '     ldind1hlconst', '         ldind1hl0', '      ldind1hl0Rel',
+	'    ldind1hl0Chain', ' lddeInd1ConstLoc1');
+BYTE[4 * numberOfInstructions] execTable;
+
+PROCEDURE clearExecTable;
+	BEGIN
+	IF	@execTable - @translationTable <> numberOfInstructions * translationTableEntrySize
+	THEN	error(92);
+		STPSUB;
+		HALT		{ Internal compiler error }
+	ENDIF;
+	execTable := 0
+	END clearExecTable;
+
+PROCEDURE showExecTable;
+	STATIC WORD a, b;
+	STATIC BYTE header = ('       Instruction  Freq Bytes   Avg', crlf, '$':[1]);
+	BEGIN
+	printString(@header);
+	ip := @translationTable;
+	kp := @execTable;
+	WHILE ip << @translationTable + translationTableEntrySize * numberOfInstructions DO
+		jp := translationTableEntrySize;
+		WHILE jp >> 0 DO
+			printChar(ip^:[1]);
+			ip := ip + 1;
+			jp := jp - 1
+		ENDWHILE;
+		a := kp^:[2];
+		printIntWidth(a, 6);
+		kp := kp + 2;
+		b := kp^:[2];
+		printIntWidth(b, 6);
+		IF	a >> 0
+		THEN	printIntWidth(b / a, 6)
+		ENDIF;
+		kp := kp + 2;
+		printLn
+	ENDWHILE
+	END showExecTable;
+{$ISTAEND.INC}
+
+{ Some procedures for debugging - not necessary for production
+Profiling must be enabled as well as translationTable is defined above }
+{debug}{
+PROCEDURE printIntHex(WORD int);
+
+	PROCEDURE printHexByte(WORD theByte);
+		STATIC BYTE hexDigits = '0123456789ABCDEF';
+		BEGIN
+		printChar(hexDigits[theByte:[1] DIV 16]:[1]);
+		printChar(hexDigits[theByte:[1] AND 15]:[1])
+		END printHexByte;
+
+	BEGIN { printIntHex }
+	printHexByte(int[1]:[1]);
+	printHexByte(int[0]:[1])
+	END printIntHex;
+
+PROCEDURE showPeepHoleBuffer;
+	BEGIN
+	kp := @peepHoleBuffer;
+	WHILE kp <> @peepHoleBuffer + instructionPointer DO
+		ip := @translationTable + translationTableEntrySize * kp^:[1];
+		jp := translationTableEntrySize;
+		WHILE jp <> 0 DO
+			printChar(ip^:[1]);
+			ip := ip + 1;
+			jp := jp - 1
+		ENDWHILE;
+		printChar(' ');
+		ip := kp + 1;
+		printInt(ip^:[2]);
+		printLn;
+		kp := kp + 3
+	ENDWHILE
+	END showPeepHoleBuffer;
+
+PROCEDURE dumpFCB(WORD fcbP);
+	BEGIN
+	ip := fcbP;
+	jp := 0;
+	IF	ip^:[1] <> 0
+	THEN	printChar(ip^:[1] + ('A' - 1));
+		printChar(':')
+	ENDIF;
+	WHILE jp << maxFileNameLength DO
+		ip := ip + 1;
+		printChar(ip^:[1]);
+		jp := jp + 1
+	ENDWHILE
+	END dumpFCB;
+
+PROCEDURE dumpSymbolTable;
+	STATIC	BYTE	symbolTableHeader = (' Addrs  Typ Value  Size', crlf, '$':[1]);
+			heapValue = ('Heap = ', '$':[1]);
+	STATIC	WORD	ip, jp;
+	BEGIN
+	printString(@heapValue);
+	printInt(heap);
+	printLn;
+	printString(@symbolTableHeader);
+	ip := symbolTableP;
+	WHILE ip <> lastEntryP DO
+		printIntWidth(ip,				6);
+		printIntWidth((ip + symbolTypeOffset)^:[1],	5);
+		printIntWidth((ip + valueOffset)^:[2],		6);
+		printIntWidth((ip + sizeOffset)^:[2],		6);
+		printChar('=');
+		jp := ip + symbolStringOffset;
+		WHILE jp^:[1] <> 0 DO
+			printChar(jp^:[1]);
+			jp := jp + 1
+		ENDWHILE;
+		printLn;
+		ip := (ip + nextEntryOffset)^:[2]
+	ENDWHILE;
+	printLn
+	END dumpSymbolTable;
+{ End debugging code }
+{debug}}
+
+PROCEDURE checkHeap;
+	BYTE	local;
+	BEGIN
+	temp := @local - heap;
+	IF	temp <<= freeMemory
+	THEN	freeMemory := temp
+	ENDIF;
+	IF	temp <<= safetyMargin
+	THEN	error54 { Program too complex, terminate compilation }
+	ENDIF
+	END checkHeap;
+
+PROCEDURE setupIncludeFile;
+	BEGIN
+	ip := @errorRecord;
+	REPEAT
+		getCharacter;
+		IF	ip <<= @errorRecord + maxFileNameLength + 1
+		THEN	ip^:[1] := upch;
+			ip := ip + 1
+		ENDIF
+	UNTIL	(ch = '}') OR (ch = eof);
+	getCharacter; { If ch = eof, ch will remain eof }
+	inputState:[inputStateSize] := splFileFCB:[inputStateSize];
+
+	ip^:[1] := 0;
+	splFileFCB := 0;
+	ip := @errorRecord; { Default }
+	IF	errorRecord[1]:[1] = ':'
+	THEN	ip := @errorRecord + 2;
+		splFileFCB[0]:[1] := errorRecord[0]:[1] + (1 - 'A')
+	ENDIF;
+
+	jp := @splFileFCB + 1;
+	WHILE jp << @splFileFCB + maxFileNameLength DO
+		ch2 := ip^:[1];
+		IF	ch2 = 0
+		THEN	jp^:[1] := ' ';
+			jp := jp + 1
+		ELSIF	ch2 = '.'
+		THEN	IF	jp <<= @splFileFCB + 8
+			THEN	jp^:[1] := ' ';
+				jp := jp + 1
+			ELSE	ip := ip + 1
+			ENDIF
+		ELSE	jp^:[1] := ch2;
+			ip := ip + 1;
+			jp := jp + 1
+		ENDIF
+	ENDWHILE;
+
+	IF	BDOS(openFileCmd, @splFileFCB) <<= leastOKCode
+	THEN	isIncluding := true;
+		pos := recordSize + 1;
+		lineNumber := 1;
+		previousErrorLine := 0;
+		getCharacter
+	ELSE	error(90); { Include file does not exist }
+		splFileFCB:[inputStateSize] := inputState:[inputStateSize]
+	ENDIF
+	END setupIncludeFile;
+
+{	Precondition:	ch is first character of unprocessed symbol
+	Postcondition:	symbol set and ch is first character of next unprocessed symbol
+		If the symbol is an identifier then
+			symbolStartP = pointer to first character of the symbol
+			symbolEndP = pointer to 0 just after the last character of the symbol
+			Case 1:	the symbol is found in the symbol table
+				symbol = value of table entry
+				symbolEntryP points to entry in symbol table
+			Case 2:	the symbol is not found in the symbol table
+				symbol = identifierSymbol
+				symbolEntryP = nil
+				heap = pointer to new entry, but heap has not yet been incremented
+		If the symbol is an integer then
+			symbolValue = value of the integer
+			Note that a string with one or two characters is also an integer
+		If the symbol is a string then
+			symbolStartP = pointer to first character of the string
+			symbolEndP = pointer to 0 just after the last character of the symbol
+			symbolLength = length of the string
+}
+PROCEDURE getSymbol;
+	STATIC WORD openCurlyBrackets; { Number of currently open curly brackets }
+	STATIC WORD shouldContinue;
+	STATIC WORD is2, is8, is10, prevIs2, prevIs8, prevIs10, value2, value8, value10, value16;
+	{ Constraint: is2, is8, is10 must be followed by prevIs2, prevIs8, prevIs10 in this order }
+
+	{	Precondition:	symbolStartP points to string of symbol read
+		Postcondition:	Case 1:	Symbol found in table
+					symbol = value of table entry
+					symbolEntryP points to entry in symbol table
+				Case 2:	Symbol not found in table
+					symbol = identifierSymbol;
+					symbolEntryP = nil
+					heap points to new entry, but heap has not been incremented yet
+					symbolEndP points to zero byte (last character of new identifier)
+	}
+	PROCEDURE lookup;
+		STATIC WORD next;
+		BEGIN
+		symbolEntryP := symbolTableP;
+		LOOP	{ Termination: entry is either found or not found }
+			IF	symbolEntryP = nil
+			THEN	symbol := identifierSymbol;
+				EXIT
+			ENDIF;
+			IF	symbolEntryP <<= lastEntryP
+			THEN	ip	:= symbolEntryP + symbolStringReservedOffset;
+				next	:= (symbolEntryP + nextEntryReservedOffset)^:[2]
+			ELSE	ip	:= symbolEntryP + symbolStringOffset;
+				next	:= (symbolEntryP + nextEntryOffset)^:[2]
+			ENDIF;
+			jp := symbolStartP;
+			{ ip points into symbol table, jp points to string to be found }
+			WHILE (ip^:[1] = jp^:[1]) OR ((ip <<= endOfKeywordTableP) AND ('a' <<= jp^:[1]) AND
+					(jp^:[1] <<= 'z') AND (ip^:[1] + ('a' - 'A') = jp^:[1])) DO
+				ip := ip + 1;
+				jp := jp + 1
+			ENDWHILE;
+			IF	(ip^:[1] = 0) AND (jp^:[1] = '#')
+			THEN	symbol := symbolEntryP^:[1]; { Found }
+				symbolEntryValue:[4] := (symbolEntryP + valueOffset)^:[4];
+				{ Also performs: symbolEntrySize := (symbolEntryP + sizeOffset)^:[2];
+				  see also constraint for symbolEntryValue and symbolEntrySize }
+				EXIT
+			ENDIF;
+			symbolEntryP := next
+		ENDLOOP
+		END lookup;
+
+	PROCEDURE checkIs(WORD is);
+		BEGIN
+		IF	is:[1] = false
+		THEN	error(01) { Error in number }
+		ENDIF
+		END checkIs;
+
+	PROCEDURE getAndSet(WORD sym);
+		BEGIN
+		getCharacter;
+		symbol := sym:[1]
+		END getAndSet;
+
+	PROCEDURE doubleChar(WORD char, s1s2);
+		BEGIN
+		getCharacter;
+		IF	ch = char:[1]
+		THEN	getAndSet(s1s2[0]:[1])
+		ELSE	symbol := s1s2[1]:[1]
+		ENDIF
+		END doubleChar;
+
+	LABEL getSymbolExit;
+
+	BEGIN { getSymbol }
+	symbolValue := 0;
+	symbol := unknownSymbol;
+	REPEAT
+		shouldContinue := false;
+		CASE upch OF
+		' ', cr, lf, tab:
+			getCharacter;
+			shouldContinue := true
+			END
+		'A'..'Z':
+			symbolEndP := heap + symbolStringOffset;
+			symbolStartP := symbolEndP;
+			WHILE	('A' <<= upch) AND (upch <<= 'Z') OR
+					('0' <<= ch) AND (ch <<= '9') OR (ch = '_') DO
+				IF	ch <> '_'
+				THEN	symbolEndP^:[1] := ch;
+					symbolEndP := symbolEndP + 1
+				ENDIF;
+				getCharacter
+			ENDWHILE;
+			symbolEndP^:[1] := '#';
+			lookup;
+			symbolEndP^:[1] := 0;
+			symbolLength := symbolEndP - symbolStartP
+			END
+		"'", '"':
+			ch2 := ch;
+			symbolEndP := heap;
+			symbolStartP := heap;
+			LOOP	{ Termination: removes a character from input and exits if eof reached }
+				getCharacter;
+				IF	ch = ch2
+				THEN	getCharacter;
+					EXIT
+				ENDIF;
+				IF	ch = eof
+				THEN	EXIT
+				ENDIF;
+				symbolEndP^:[1] := ch;
+				symbolEndP := symbolEndP + 1
+			ENDLOOP;
+			symbolLength := symbolEndP - symbolStartP;
+			symbol := unsignedIntegerSymbol;
+			CASE symbolLength OF
+			0:	symbolValue := 0		END
+			1:	symbolValue := heap^:[1]	END
+			2:	symbolValue := heap^:[2]	END
+			ELSE	symbol := stringSymbol;
+				symbolEndP^:[1] := 0
+			ENDCASE
+			END
+		'0'..'9':
+			symbol		:= unsignedIntegerSymbol;
+			is2		:= true;
+			prevIs2		:= true;
+			is8		:= true;
+			prevIs8		:= true;
+			is10		:= true;
+			prevIs10	:= true;
+			value2		:= 0;
+			value8		:= 0;
+			value10		:= 0;
+			value16		:= 0;
+			WHILE	('0' <<= upch) AND (upch <<= '9') OR
+				('A' <<= upch) AND (upch <<= 'F') OR (upch = '_') DO
+				IF	upch <> '_'
+				THEN	prevIs2:[6] := is2:[6]; { See constraint at declaration }
+					ch2 := upch - '0';
+					IF	upch >>= '2'
+					THEN	is2 := false
+					ELSE	value2 := 2 * value2 + ch2
+					ENDIF;
+					IF	upch >>= '8'
+					THEN	is8 := false
+					ELSE	value8 := 8 * value8 + ch2
+					ENDIF;
+					IF	upch >>= 'A'
+					THEN	is10 := false;
+						value16 := 16 * value16 + upch + (10 - 'A')
+					ELSE	value16 := 16 * value16 + ch2;
+						value10 := 10 * value10 + ch2
+					ENDIF;
+					ch2 := upch
+				ENDIF;
+				getCharacter
+			ENDWHILE;
+			IF	upch = 'H'			{ Hex		}
+			THEN	getCharacter;
+				symbolValue := value16
+			ELSIF	upch = 'O'			{ Octal		}
+			THEN	getCharacter;
+				symbolValue := value8;
+				checkIs(is8)
+			ELSE	CASE ch2 OF
+				'B':	symbolValue := value2;	{ Binary	}
+					checkIs(prevIs2)
+					END
+				'C':	symbolValue := value8;	{ Octal		}
+					checkIs(prevIs8)
+					END
+				'D':	symbolValue := value10;	{ Decimal	}
+					checkIs(prevIs10)
+					END
+				ELSE	symbolValue := value10;	{ Decimal	}
+					checkIs(is10)
+				ENDCASE
+			ENDIF
+			END
+		'<':	getCharacter;
+			IF	ch = '<'
+			THEN	doubleChar('=', lessOrEqualUnsignedSymbol + 256 * lessUnsignedSymbol)
+			ELSIF	ch = '='
+			THEN	getAndSet(lessOrEqualSignedSymbol)
+			ELSIF	ch = '>'
+			THEN	getAndSet(notEqualSymbol)
+			ELSE	symbol := lessSignedSymbol
+			ENDIF
+			END
+		'>':	getCharacter;
+			IF	ch = '>'
+			THEN	doubleChar('=', greaterOrEqualUnsignedSymbol + 256 * greaterUnsignedSymbol)
+			ELSIF	ch = '='
+			THEN	getAndSet(greaterOrEqualSignedSymbol)
+			ELSE	symbol := greaterSignedSymbol
+			ENDIF
+			END
+		':':	doubleChar('=', assignSymbol + 256 * colonSymbol)
+			END
+		'.':	doubleChar('.', rangeSymbol + 256 * periodSymbol)
+			END
+		'-':	doubleChar('>', pointerSymbol + 256 * minusSymbol)
+			END
+		'#':	getAndSet(notEqualSymbol)
+			END
+		'=':	getAndSet(equalSymbol)
+			END
+		'+':	getAndSet(plusSymbol)
+			END
+		'*':	getAndSet(timesSymbol)
+			END
+		'/':	getAndSet(divideSymbol)
+			END
+		'&':	getAndSet(andSymbol)
+			END
+		'@':	getAndSet(addressOfSymbol)
+			END
+		'(':	getAndSet(leftRoundParenthesesSymbol)
+			END
+		')':	getAndSet(rightRoundParenthesesSymbol)
+			END
+		'[':	getAndSet(leftSquareParenthesesSymbol)
+			END
+		']':	getAndSet(rightSquareParenthesesSymbol)
+			END
+		'^':	getAndSet(pointerSymbol)
+			END
+		',':	getAndSet(commaSymbol)
+			END
+		';':	getAndSet(semicolonSymbol)
+			END
+		eof:	symbol := eofSymbol
+			END
+		ELSE	{ treat opening curly bracket and | separately in order to reduce range of
+			the CASE statement above }
+			IF	ch = '{'
+			THEN	getCharacter;
+				IF	ch = '$'
+				THEN	getCharacter;
+					IF	upch = 'I'
+					THEN	IF	isIncluding
+						THEN	error(89) { Recursive include not allowed }
+						ELSE	setupIncludeFile;
+							CONTINUE
+						ENDIF
+					ELSIF	upch = 'M'
+					THEN	getCharacter;
+						optimizedMultiplication := 0;
+						WHILE ('0' <<= ch) AND (ch <<= '9') DO
+							optimizedMultiplication :=
+								10 * optimizedMultiplication + ch - '0';
+							getCharacter
+						ENDWHILE
+					ENDIF
+				ENDIF;
+				openCurlyBrackets := 1;
+				LOOP	{ Termination: removes a character from input and exits if eof reached }
+					IF	ch = eof
+					THEN	symbol := eofSymbol;
+						GOTO getSymbolExit
+					ENDIF;
+					IF	ch = '}'
+					THEN	openCurlyBrackets := openCurlyBrackets - 1;
+						IF	openCurlyBrackets = 0
+						THEN	getCharacter;
+							EXIT
+						ENDIF
+					ELSIF	ch = '{'
+					THEN	getCharacter;
+						IF	ch = '$'
+						THEN	getCharacter;
+							IF	upch = 'I'
+							THEN	IF	isIncluding
+								THEN	error(89) { Recursive include not allowed }
+								ELSE	setupIncludeFile;
+									{ also consumes closing bracket }
+									CONTINUE
+								ENDIF
+								{ (upch = 'I') and error }
+							ENDIF
+							{$Arrive here }
+							{ (upch <> 'I') or (upch = 'I') and error }
+						ENDIF;
+						{Arrive here}
+						{ (ch <> '$') or (upch <> 'I') or (upch = 'I') and error }
+						openCurlyBrackets := openCurlyBrackets + 1;
+						CONTINUE
+					ENDIF;
+					getCharacter
+				ENDLOOP;
+				shouldContinue := true
+			ELSIF	ch = '|'
+			THEN	getAndSet(orSymbol)
+			ELSE	getCharacter
+			ENDIF
+		ENDCASE
+	UNTIL NOT shouldContinue;
+getSymbolExit:
+	END getSymbol;
+
+{ symErr = symbol + 256 * error }
+PROCEDURE verifyExpectedSymbol(WORD symErr);
+	BEGIN
+	IF	symbol = symErr[0]:[1]
+	THEN	getSymbol
+	ELSE	error(symErr[1]:[1])
+	ENDIF
+	END verifyExpectedSymbol;
+
+PROCEDURE verifySemicolonSymbol;
+	BEGIN
+	verifyExpectedSymbol(semicolonSymbol + 256 * 56) { ";" expected }
+	END verifySemicolonSymbol;
+
+PROCEDURE verifyRightRoundParenthesesSymbol;
+	BEGIN
+	verifyExpectedSymbol(rightRoundParenthesesSymbol + 256 * 51) { ")" expected }
+	END verifyRightRoundParenthesesSymbol;
+
+PROCEDURE verifyRightSquareParenthesesSymbol;
+	BEGIN
+	verifyExpectedSymbol(rightSquareParenthesesSymbol + 256 * 45) { "]" expected }
+	END verifyRightSquareParenthesesSymbol;
+
+PROCEDURE verifyCommaOrSemicolon;
+	BEGIN
+	IF	(symbol = commaSymbol) OR (symbol = semicolonSymbol)
+	THEN	getSymbol
+	ELSE	error(24) { ";" or "," expected }
+	ENDIF
+	END verifyCommaOrSemicolon;
+
+{ REL file handling }
+PROCEDURE appendBitRelFile;
+	BEGIN
+	relFileBitPosition := relFileBitPosition + 1;
+	IF	relFileBitPosition = 8
+	THEN	relFileRecord[relFileBytePosition]:[1] := relFileByte:[1];
+		relFileBytePosition := relFileBytePosition + 1;
+		IF	relFileBytePosition = recordSize
+		THEN	BDOS(setDMAAddressCmd, @relFileRecord);
+			IF	BDOS(writeSequentialCmd, @relFileFCB) <> noError
+			THEN	error(91) { Error writing REL file }
+			ENDIF;
+			relFileBytePosition := 0
+		ENDIF;
+		relFileBitPosition := 0
+	ENDIF
+	END appendBitRelFile;
+
+PROCEDURE appendZeroBit;
+	BEGIN
+	relFileByte := 2 * relFileByte;
+	appendBitRelFile
+	END appendZeroBit;
+
+{ Invariant: keeps global variable ip unchanged }
+PROCEDURE appendBitsRelFile(WORD bits, number);
+	BEGIN
+	IF	number:[1] >> 1
+	THEN	appendBitsRelFile(bits DIV 2, number:[1] - 1)
+	ENDIF;
+	relFileByte := 2 * relFileByte + (bits:[1] AND 1);
+	appendBitRelFile
+	END appendBitsRelFile;
+
+PROCEDURE appendBitsRelFile9(WORD bits);
+	BEGIN
+	appendBitsRelFile(bits, 9)
+	END appendBitsRelFile9;
+
+PROCEDURE appendWordRelFile(WORD bits);
+	BEGIN
+	appendBitsRelFile(bits[0]:[1], 8);
+	appendBitsRelFile(bits[1]:[1], 8)
+	END appendWordRelFile;
+
+PROCEDURE appendProgramCounterRelFile;
+	BEGIN
+	appendBitsRelFile9(100_1011_01B); { Set loading location relative }
+	appendWordRelFile(programCounter)
+	END appendProgramCounterRelFile;
+
+PROCEDURE appendNameRelFile(WORD symbolStartP);
+	STATIC WORD len, xp;
+	BEGIN
+	xp := symbolStartP;
+	len := 0;
+	WHILE xp^:[1] <> 0 DO
+		len := len + 1;
+		xp := xp + 1
+	ENDWHILE;
+	IF	len >> 7
+	THEN	len := 7
+	ENDIF;
+	appendBitsRelFile(len, 3);
+	WHILE len <> 0 DO
+		appendBitsRelFile(symbolStartP^:[1], 8);
+		symbolStartP := symbolStartP + 1;
+		len := len - 1
+	ENDWHILE
+	END appendNameRelFile;
+
+PROCEDURE appendEntryPointRelFile(WORD entrySymbolP);
+	BEGIN
+	IF	entrySymbolP <> nil
+	THEN	appendBitsRelFile9(100_0111_01B); { Entry point }
+		appendWordRelFile(programCounter);
+		appendNameRelFile(entrySymbolP + symbolStringOffset)
+	ENDIF
+	END appendEntryPointRelFile;
+
+
+{ Code generation }
+
+PROCEDURE validateHL;
+	BEGIN
+	hlValueValid := true;
+	hlValueValid2 := false;
+	hlValue := currentInstructionAddress;
+	ldhlInstruction := currentInstructionOpCode
+	END validateHL;
+
+PROCEDURE validateHL2;
+	BEGIN
+	hlValueValid2 := true;
+	hlValue2 := currentInstructionAddress;
+	ldhlInstruction2 := (currentInstructionOpCode - sthl2Const) DIV 2 + ldhlIndConst
+	END validateHL2;
+
+PROCEDURE invalidateHL;
+	BEGIN
+	hlValueValid := false;
+	hlValueValid2 := false
+	END invalidateHL;
+
+PROCEDURE validateDE;
+	BEGIN
+	deValueValid := true;
+	deValue := currentInstructionAddress;
+	lddeInstruction := currentInstructionOpCode
+	END validateDE;
+
+PROCEDURE invalidateDE;
+	BEGIN
+	deValueValid := false
+	END invalidateDE;
+
+PROCEDURE swapDEHL;
+	BEGIN
+	temp := deValueValid;
+	deValueValid := hlValueValid;
+	invalidateHL;
+	hlValueValid := temp;
+	temp := deValue;
+	deValue := hlValue;
+	hlValue := temp;
+	temp := lddeInstruction;
+	lddeInstruction := ldhlInstruction + (lddeConst - ldhlConst);
+	ldhlInstruction := temp + (ldhlConst - lddeConst)
+	END swapDEHL;
+
+{ Invalidate DE in case it holds a variable - used after store instructions
+  to avoid aliasing issues }
+PROCEDURE invalidateVariableDE;
+	BEGIN
+	IF	lddeInstruction >>= lddeIndConst
+	THEN	deValueValid := false
+	ENDIF
+	END invalidateVariableDE;
+
+PROCEDURE invalidateDESelective1(WORD opcodes);
+	BEGIN
+	IF	(deValue = currentInstructionAddress) AND
+		((lddeInstruction = opcodes[0]:[1]) OR
+		 (lddeInstruction = opcodes[1]:[1]))
+		OR
+		(deValue = currentInstructionAddress + 1) AND
+		(lddeInstruction = opcodes[1]:[1])
+	THEN	deValueValid := false
+	ENDIF
+	END invalidateDESelective1;
+
+PROCEDURE invalidateDESelective2(WORD opcodes);
+	BEGIN
+	IF	(lddeInstruction = opcodes[0]:[1]) AND
+		((deValue = currentInstructionAddress) OR
+		 (deValue = currentInstructionAddress + 1))
+		OR
+		(lddeInstruction = opcodes[1]:[1]) AND
+		((deValue = currentInstructionAddress) OR
+		 (deValue = currentInstructionAddress + 1) OR
+		 (deValue = currentInstructionAddress - 1))
+	THEN	deValueValid := false
+	ENDIF
+	END invalidateDESelective2;
+
+PROCEDURE invalidateAll;
+	BEGIN
+	invalidateDE;
+	invalidateHL
+	END invalidateAll;
+
+PROCEDURE emitSimple(WORD instruction, address);
+	BEGIN
+	IF	instructionPointer >>= 3 * peepHoleBufferLength
+	THEN	error54 { Program too complex, terminate compilation }
+	ENDIF; { ELSE }
+	peepHoleBuffer[instructionPointer]:[1] := instruction:[1];
+	peepHoleBuffer[instructionPointer + addressOffset]:[2] := address:[2];
+	instructionPointer := instructionPointer + 3
+	END emitSimple;
+
+PROCEDURE emitSimple0(WORD instruction);
+	BEGIN
+	emitSimple(instruction:[1], 0)
+	END emitSimple0;
+
+PROCEDURE emit0(WORD instruction); FORWARD;
+
+PROCEDURE emit0exhlde;
+	BEGIN
+	emit0(exhlde)
+	END emit0exhlde;
+
+PROCEDURE emit0derefhl2;
+	BEGIN
+	emit0(derefhl2)
+	END emit0derefhl2;
+
+PROCEDURE emit0pushhl;
+	BEGIN
+	emit0(pushhl)
+	END emit0pushhl;
+
+PROCEDURE emit0boolnot;
+	BEGIN
+	emit0(boolnot)
+	END emit0boolnot;
+
+PROCEDURE emit0popde;
+	BEGIN
+	emit0(popde)
+	END emit0popde;
+
+PROCEDURE emit0cmpuge;
+	BEGIN
+	emit0(cmpuge)
+	END emit0cmpuge;
+
+PROCEDURE emit0cmpult;
+	BEGIN
+	emit0(cmpult)
+	END emit0cmpult;
+
+PROCEDURE goBackOne;
+	BEGIN
+	instructionPointer := instructionPointer - 3
+	END goBackOne;
+
+PROCEDURE emit(WORD instruction, address);
+	LABEL emitOptimizedCompare, checkForDivisionByZero;
+	STATIC WORD	currentInstruction,
+			currentAddress,
+			previousInstruction1,
+			previousInstruction2,
+			previousAddress1,
+			previousAddress2,
+			instructionPointer3,
+			instructionPointer6;
+
+	{PROCEDURE showOptimization;
+		BEGIN
+		printInt(lineNumber);
+		printChar(' ');
+		printIntHex(programCounter + 103H);
+		printLn
+		END showOptimization;}
+
+	PROCEDURE emitConstMultiplication(WORD constant);
+	{ Inlining produces at most 5 bytes of code for: 2..6, 8, 16, 32, 256 and
+	  is therefore more efficient than load and procedure call which require 5 bytes }
+
+		{ Precondition: <DE> contains original value of <HL>
+		  postcondition: emitted code multiplies <HL> by constant }
+		PROCEDURE constMultiplication(WORD constant);
+			BEGIN
+			IF	constant >> 1 { I.e. not done yet }
+			THEN	constMultiplication(constant DIV 2);
+				emitSimple0(dup2hl);
+				IF	constant AND 1 <> 0
+				THEN	emitSimple0(addhlde)
+				ENDIF
+			ENDIF
+			END constMultiplication;
+
+		BEGIN { emitConstMultiplication }
+		ip := constant;
+		jp := ip;
+		IF	jp = 256
+		THEN	emitSimple0(mul256)
+		ELSE	WHILE ip AND 1 = 0 DO
+				ip := ip DIV 2
+			ENDWHILE;
+			IF	ip = 1 { Constant is a power of two }
+			THEN	WHILE jp >> 1 DO
+					emitSimple0(dup2hl);
+					jp := jp DIV 2
+				ENDWHILE
+			ELSE	emitSimple0(lddehl); { Needed if constant is not a power of two }
+				constMultiplication(jp)
+			ENDIF
+		ENDIF
+		END emitConstMultiplication;
+
+	PROCEDURE goBackTwo;
+		BEGIN
+		instructionPointer := instructionPointer6
+		END goBackTwo;
+
+	PROCEDURE emitSimpleCurrentAddress(WORD instruction);
+		BEGIN
+		emitSimple(instruction:[1], currentAddress)
+		END emitSimpleCurrentAddress;
+
+	PROCEDURE emitSimplePreviousAddress1(WORD instruction);
+		BEGIN
+		emitSimple(instruction:[1], previousAddress1)
+		END emitSimplePreviousAddress1;
+
+	PROCEDURE emitSimplePreviousAddress2(WORD instruction);
+		BEGIN
+		emitSimple(instruction:[1], previousAddress2)
+		END emitSimplePreviousAddress2;
+
+	PROCEDURE emitSimplePreviousInstruction1;
+		BEGIN
+		emitSimplePreviousAddress1(previousInstruction1)
+		END emitSimplePreviousInstruction1;
+
+	PROCEDURE emitSimplePreviousInstruction1ToDE;
+		BEGIN
+		emitSimplePreviousAddress1(previousInstruction1 + (lddeConst - ldhlConst))
+		END emitSimplePreviousInstruction1ToDE;
+
+	PROCEDURE emitSimplePreviousInstruction1ToHL;
+		BEGIN
+		emitSimplePreviousAddress1(previousInstruction1 + (ldhlConst - lddeConst))
+		END emitSimplePreviousInstruction1ToHL;
+
+	PROCEDURE emitPreviousInstruction1ToHL;
+		BEGIN
+		emit(previousInstruction1 + (ldhlConst - lddeConst), previousAddress1)
+		END emitPreviousInstruction1ToHL;
+
+	PROCEDURE emitSimplePreviousInstruction2ToHL;
+		BEGIN
+		emitSimplePreviousAddress2(previousInstruction2 + (ldhlConst - lddeConst))
+		END emitSimplePreviousInstruction2ToHL;
+
+	PROCEDURE emitSimplePreviousInstruction2ToDE;
+		BEGIN
+		emitSimplePreviousAddress2(previousInstruction2 + (lddeConst - ldhlConst))
+		END emitSimplePreviousInstruction2ToDE;
+
+	PROCEDURE emitSimple0inchl;
+		BEGIN
+		emitSimple0(inchl)
+		END emitSimple0inchl;
+
+	PROCEDURE emitSimple0inchl_inchl;
+		BEGIN
+		emitSimple0inchl;
+		emitSimple0inchl
+		END emitSimple0inchl_inchl;
+
+	PROCEDURE emitSimple0dechl;
+		BEGIN
+		emitSimple0(dechl)
+		END emitSimple0dechl;
+
+	PROCEDURE emitSimple0dechl_dechl;
+		BEGIN
+		emitSimple0dechl;
+		emitSimple0dechl
+		END emitSimple0dechl_dechl;
+
+	PROCEDURE emitSimple0inc1;
+		BEGIN
+		emitSimple0(inc1)
+		END emitSimple0inc1;
+
+	PROCEDURE emitSimple0dec1;
+		BEGIN
+		emitSimple0(dec1)
+		END emitSimple0dec1;
+
+	PROCEDURE emitSimple0store1;
+		BEGIN
+		emitSimple0(store1)
+		END emitSimple0store1;
+
+	PROCEDURE emit0cmpSwap;
+		BEGIN
+		emit0(cmpSwap[currentInstruction - cmplt]:[1])
+		END emit0cmpSwap;
+
+	PROCEDURE emitSimpleCurrentAddressldhlConstChain;
+		BEGIN
+		emitSimpleCurrentAddress(ldhlConstChain)
+		END emitSimpleCurrentAddressldhlConstChain;
+
+	PROCEDURE emitSimpleCurrentAddressldhlConstRel;
+		BEGIN
+		emitSimpleCurrentAddress(ldhlConstRel)
+		END emitSimpleCurrentAddressldhlConstRel;
+
+	PROCEDURE emitSimpleCurrentAddressldhlConst;
+		BEGIN
+		emitSimpleCurrentAddress(ldhlConst)
+		END emitSimpleCurrentAddressldhlConst;
+
+	PROCEDURE emitSimplePreviousAddress1ldind1hlconst;
+		BEGIN
+		emitSimplePreviousAddress1(ldind1hlconst)
+		END emitSimplePreviousAddress1ldind1hlconst;
+
+	BEGIN { emit }
+
+	{ Need quick access to the preceding two instructions, peepHoleBufferTrailer guarantees existence }
+	currentInstruction	:= instruction:[1];
+	currentAddress		:= address;
+	instructionPointer3	:= instructionPointer - 3;
+	previousInstruction1	:= peepHoleBuffer[instructionPointer3]:[1];
+	previousAddress1	:= peepHoleBuffer[instructionPointer3 + addressOffset]:[2];
+	instructionPointer6	:= instructionPointer - 6;
+	previousInstruction2	:= peepHoleBuffer[instructionPointer6]:[1];
+	previousAddress2	:= peepHoleBuffer[instructionPointer6 + addressOffset]:[2];
+
+	{ ldhlConst..ldhlConstLoc c|derefhl2 or derefhl1  ->
+	  ldhlIndConst..ldhlIndConstLoc c or ldhlInd1Const..ldhlInd1ConstLoc c }
+	IF	((currentInstruction = derefhl2) OR (currentInstruction = derefhl1)) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlConstLoc)
+	THEN	IF	currentInstruction = derefhl2
+		THEN	temp := previousInstruction1 + (ldhlIndConst - ldhlConst)
+		ELSE	temp := previousInstruction1 + (ldhlInd1Const - ldhlConst)
+		ENDIF;
+		peepHoleBuffer[instructionPointer3]:[1] := temp
+
+	{ pushhl|ldhlConst..ldhlInd1ConstLoc c|popde -> lddeConst..lddeInd1ConstLoc c|exhlde }
+	ELSIF	(currentInstruction = popde) AND (previousInstruction2 = pushhl) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToDE;
+		emit0exhlde { Try again }
+
+	{ lddeConst c1|ldhlConst..ldhlInd1ConstLoc c2|(store1 or store2) -> ldhlConst..ldhlInd1ConstLoc c2|stInd1Const c1}
+	ELSIF	((currentInstruction = store1) OR (currentInstruction = store2)) AND
+		(previousInstruction2 = lddeConst) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1;
+		IF	currentInstruction = store1
+		THEN	emitSimple(stInd1Const, previousAddress2:[1])
+		ELSE	emitSimplePreviousAddress2(stInd2Const)
+		ENDIF
+
+	{ lddeConst c1|(store1 or store2) -> stInd1Const c1}
+	ELSIF	((currentInstruction = store1) OR (currentInstruction = store2)) AND
+		(previousInstruction1 = lddeConst)
+	THEN	goBackOne;
+		IF	currentInstruction = store1
+		THEN	emitSimple(stInd1Const, previousAddress1:[1])
+		ELSE	emitSimplePreviousAddress1(stInd2Const)
+		ENDIF
+
+	{ lddeInd1Const..lddeInd1ConstChain c1|ldhlConst..ldhlInd1ConstLoc c2|store1 ->
+	  lddeIndConst..lddeIndConstChain c1|ldhlConst..ldhlInd1ConstLoc c2|store1 }
+	ELSIF	(currentInstruction = store1) AND
+		(lddeInd1Const <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstChain) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousAddress2(previousInstruction2 + (lddeIndConst - lddeInd1Const));
+		emitSimplePreviousInstruction1;
+		emitSimple0store1
+
+	{ lddeInd1ConstLoc c1|ldhlConst..ldhlInd1ConstLoc c2|store1 -> lddeInd1ConstLoc1 c1|ldhlConst..ldhlInd1ConstLoc c2|store1 }
+	ELSIF	(currentInstruction = store1) AND
+		(previousInstruction2 = lddeInd1ConstLoc) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousAddress2(lddeInd1ConstLoc1);
+		emitSimplePreviousInstruction1;
+		emitSimple0store1
+
+	{ ldhlConst..ldhlInd1ConstLoc c2|lddeInd1Const..lddeInd1ConstLoc c1|store1 ->
+	  ldhlConst..ldhlInd1ConstLoc c2|lddeIndConst..lddeIndConstLoc c1|store1 }
+	ELSIF	(currentInstruction = store1) AND
+		(lddeInd1Const <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc) AND
+		(ldhlConst <<= previousInstruction2) AND (previousInstruction2 <<= ldhlInd1ConstLoc)
+	THEN	goBackOne;
+		emitSimplePreviousAddress1(previousInstruction1 + (lddeIndConst - lddeInd1Const));
+		emitSimple0store1
+
+	{ ldhlConstRel c1|lddeConst c2|addhlde or lddeConstRel c1|ldhlConst c2|addhlde or
+	  ldhlConst c1|lddeConstRel c2|addhlde or lddeConst c1|ldhlConstRel c2|addhlde or
+	   -> ldhlConstRel c1 + c2}
+	ELSIF	(currentInstruction = addhlde) AND (
+		 (previousInstruction2 = ldhlConstRel)	AND (previousInstruction1 = lddeConst) OR
+		 (previousInstruction2 = lddeConstRel)	AND (previousInstruction1 = ldhlConst) OR
+		 (previousInstruction2 = ldhlConst)	AND (previousInstruction1 = lddeConstRel) OR
+		 (previousInstruction2 = lddeConst)	AND (previousInstruction1 = ldhlConstRel)
+		 )
+	THEN	goBackTwo;
+		emitSimple(ldhlConstRel, previousAddress1 + previousAddress2)
+
+	{ ldhlConstRel c1|lddeConst c2|subhlde -> ldhlConstRel c1 - c2 }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = ldhlConstRel) AND (previousInstruction1 = lddeConst)
+	THEN	goBackTwo;
+		emitSimple(ldhlConstRel, previousAddress2 - previousAddress1)
+
+	{ lddeConst c1|ldhlConstRel c2|subhlde -> ldhlConstRel c2 - c1 }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = lddeConst) AND (previousInstruction1 = ldhlConstRel)
+	THEN	goBackTwo;
+		emitSimple(ldhlConstRel, previousAddress1 - previousAddress2)
+
+	{ ldhlConstLoc c1|lddeConst c2|addhlde or lddeConstLoc c1|ldhlConst c2|addhlde or
+	  ldhlConst c1|lddeConstLoc c2|addhlde or lddeConst c1|ldhlConstLoc c2|addhlde or
+	   -> ldhlConstLoc c1 + c2 }
+	ELSIF	(currentInstruction = addhlde) AND (
+		 (previousInstruction2 = ldhlConstLoc)	AND (previousInstruction1 = lddeConst) OR
+		 (previousInstruction2 = lddeConstLoc)	AND (previousInstruction1 = ldhlConst) OR
+		 (previousInstruction2 = ldhlConst)	AND (previousInstruction1 = lddeConstLoc) OR
+		 (previousInstruction2 = lddeConst)	AND (previousInstruction1 = ldhlConstLoc)
+		 )
+	THEN	goBackTwo;
+		emitSimple(ldhlConstLoc, previousAddress1 + previousAddress2)
+
+	{ ldhlConstLoc c1|lddeConst c2|subhlde -> ldhlConstLoc c1 - c2 }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = ldhlConstLoc) AND (previousInstruction1 = lddeConst)
+	THEN	goBackTwo;
+		emitSimple(ldhlConstLoc, previousAddress2 - previousAddress1)
+
+	{ lddeConst c1|ldhlConstLoc c2|subhlde -> ldhlConstLoc c2 - c1 }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = lddeConst) AND (previousInstruction1 = ldhlConstLoc)
+	THEN	goBackTwo;
+		emitSimple(ldhlConstLoc, previousAddress1 - previousAddress2)
+
+	{ ldhlInd1Const c|inchl|sthl1Const c -> ldhlConst c|inc1 }
+	ELSIF	(currentInstruction = sthl1Const) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1Const) AND (previousInstruction1 = inchl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddressldhlConst;
+		emitSimple0inc1
+
+	{ ldhlInd1ConstRel c|inchl|sthl1ConstRel c -> ldhlConstRel c|inc1 }
+	ELSIF	(currentInstruction = sthl1ConstRel) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1ConstRel) AND (previousInstruction1 = inchl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddressldhlConstRel;
+		emitSimple0inc1
+
+	{ ldhlInd1ConstChain c|inchl|sthl1ConstChain c -> ldhlConstChain c|inc1 }
+	ELSIF	(currentInstruction = sthl1ConstChain) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1ConstChain) AND (previousInstruction1 = inchl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddressldhlConstChain;
+		emitSimple0inc1
+
+	{ ldhlInd1ConstLoc c|inchl|sthl1ConstLoc c -> inc1l c }
+	ELSIF	(currentInstruction = sthl1ConstLoc) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1ConstLoc) AND (previousInstruction1 = inchl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddress(inc1l)
+
+	{ ldhlInd1Const c|dechl|sthl1Const c -> ldhlConst c|dec1 }
+	ELSIF	(currentInstruction = sthl1Const) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1Const) AND (previousInstruction1 = dechl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddressldhlConst;
+		emitSimple0dec1
+
+	{ ldhlInd1ConstRel c|dechl|sthl1ConstRel c -> ldhlConstRel c|inc1 }
+	ELSIF	(currentInstruction = sthl1ConstRel) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1ConstRel) AND (previousInstruction1 = dechl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddressldhlConstRel;
+		emitSimple0dec1
+
+	{ ldhlInd1ConstChain c|dechl|sthl1ConstChain c -> ldhlConstChain c|inc1 }
+	ELSIF	(currentInstruction = sthl1ConstChain) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1ConstChain) AND (previousInstruction1 = dechl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddressldhlConstChain;
+		emitSimple0dec1
+
+	{ ldhlInd1ConstLoc c|dechl|sthl1ConstLoc c -> dec1l c }
+	ELSIF	(currentInstruction = sthl1ConstLoc) AND (currentAddress = previousAddress2) AND
+		(previousInstruction2 = ldhlInd1ConstLoc) AND (previousInstruction1 = dechl)
+	THEN	goBackTwo;
+		emitSimpleCurrentAddress(dec1l)
+
+	{ ldhlConst c1|sthl1Const c2 -> ldhlConst c2|ldind1hlconst c1 }
+	ELSIF	(currentInstruction = sthl1Const) AND (previousInstruction1 = ldhlConst)
+	THEN	goBackOne;
+		IF	previousAddress1:[1] = 0
+		THEN	emitSimpleCurrentAddress(ldind1hl0)
+		ELSE	emitSimpleCurrentAddressldhlConst;
+			emitSimplePreviousAddress1ldind1hlconst
+		ENDIF
+
+	{ ldhlConst c1|sthl1ConstRel c2 -> ldhlConstRel c2|ldind1hlconst c1 }
+	ELSIF	(currentInstruction = sthl1ConstRel) AND (previousInstruction1 = ldhlConst)
+	THEN	goBackOne;
+		IF	previousAddress1:[1] = 0
+		THEN	emitSimpleCurrentAddress(ldind1hl0Rel)
+		ELSE	emitSimpleCurrentAddressldhlConstRel;
+			emitSimplePreviousAddress1ldind1hlconst
+		ENDIF
+
+	{ ldhlConst c1|sthl1ConstChain c2 -> ldhlConstChain c2|ldind1hlconst c1 }
+	ELSIF	(currentInstruction = sthl1ConstChain) AND (previousInstruction1 = ldhlConst)
+	THEN	goBackOne;
+		IF	previousAddress1:[1] = 0
+		THEN	emitSimpleCurrentAddress(ldind1hl0Chain)
+		ELSE	emitSimpleCurrentAddressldhlConstChain;
+			emitSimplePreviousAddress1ldind1hlconst
+		ENDIF
+
+	{ ldhlConst c1|lddeConst c2|addhlde..andhlde or lddeConst c1|ldhlConst c2|addhlde..andhlde ->
+	  ldhlConst HL op DE, uses constraint that addhlde to orhlde sequential }
+	ELSIF	(addhlde <<= currentInstruction) AND (currentInstruction <<= orhlde) AND
+		((previousInstruction1 = ldhlConst) AND (previousInstruction2 = lddeConst) OR
+		(previousInstruction2 = ldhlConst) AND (previousInstruction1 = lddeConst))
+	THEN	IF	previousInstruction1 = ldhlConst
+		THEN	ip := previousAddress1;	{ ip = HL }
+			jp := previousAddress2	{ jp = DE }
+		ELSE	jp := previousAddress1;	{ jp = DE }
+			ip := previousAddress2	{ ip = HL }
+		ENDIF;
+		CASE currentInstruction OF
+			addhlde:	temp := ip + jp
+			END
+			subhlde:	temp := ip - jp
+			END
+			mulhlde:	temp := ip * jp
+			END
+			sdivhlde:	temp := ip / jp;
+					GOTO checkForDivisionByZero
+			END
+			udivhlde:	temp := ip DIV jp;
+checkForDivisionByZero:
+					IF	jp = 0
+					THEN	error(38) { Division by 0 }
+					ENDIF
+			END
+			modhlde:	temp := ip MOD jp;
+					IF	jp = 0
+					THEN	error(39) { Modulo with 0 }
+					ENDIF
+			END
+			andhlde:	temp := ip AND jp
+			END
+			orhlde:		temp := ip OR jp
+			END
+		ENDCASE;
+		goBackTwo;
+		emitSimple(ldhlConst, temp)
+
+	{ ldhlConst c|neghl -> ldhlConst -c }
+	ELSIF	(currentInstruction = neghl) AND (previousInstruction1 = ldhlConst)
+	THEN	goBackOne;
+		emitSimple(previousInstruction1, -previousAddress1)
+
+	{ exhlde|exhlde -> epsilon }
+	ELSIF	(currentInstruction = exhlde) AND (previousInstruction1 = exhlde)
+	THEN	goBackOne
+
+	{ exhlde|(addhlde or mulhlde or andhlde or orhlde or cmpeq or cmpneq) ->
+	  (addhlde or mulhlde or andhlde or orhlde or cmpeq or cmpneq) }
+	ELSIF	(previousInstruction1 = exhlde) AND (
+			(currentInstruction = addhlde) OR (currentInstruction = mulhlde) OR
+			(currentInstruction = cmpeq) OR (currentInstruction = cmpneq) OR
+			(currentInstruction = andhlde) OR (currentInstruction = orhlde))
+	THEN	goBackOne;
+		emit0(currentInstruction) { Try again }
+
+	{ lddeConst..lddeInd1ConstLoc c1|ldhlConst..ldhlInd1ConstLoc c2|exhlde ->
+	  ldhlConst..ldhlInd1ConstLoc c1|lddeConst..lddeInd1ConstLoc c2 }
+	ELSIF	(currentInstruction = exhlde) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc) AND
+		(lddeConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction2ToHL;
+		emit(previousInstruction1 + (lddeConst - ldhlConst), previousAddress1) { Try again }
+
+	{ ldhlConst..ldhlInd1ConstLoc c1|lddeConst..lddeInd1ConstLoc c2|exhlde -> lddeConst..lddeInd1ConstLoc c1|ldhlConst..ldhlInd1ConstLoc c2 }
+	ELSIF	(currentInstruction = exhlde) AND
+		(ldhlConst <<= previousInstruction2) AND (previousInstruction2 <<= ldhlInd1ConstLoc) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction2ToDE;
+		emitPreviousInstruction1ToHL { Try again }
+
+	{ exhlde|cmplt..cmpugx -> cmpSwap(cmplt..cmpugx) }
+	ELSIF	(cmplt <<= currentInstruction) AND (currentInstruction <<= cmpugx) AND
+		(previousInstruction1 = exhlde)
+	THEN	goBackOne;
+		emit0cmpSwap
+
+	{ ldhlConst..ldhlInd1ConstLoc c|setdefromhl -> lddeConst..lddeInd1ConstLoc c }
+	ELSIF	(currentInstruction = setdefromhl) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackOne;
+		emitSimplePreviousInstruction1ToDE;
+
+	{ lddeConst 1|addhlde -> inchl }
+	ELSIF	(currentInstruction = addhlde) AND (previousInstruction1 = lddeConst) AND (previousAddress1 = 1)
+	THEN	goBackOne;
+		emitSimple0inchl
+
+	{ lddeConst 2|addhlde -> inchl|inchl }
+	ELSIF	(currentInstruction = addhlde) AND (previousInstruction1 = lddeConst) AND (previousAddress1 = 2)
+	THEN	goBackOne;
+		emitSimple0inchl_inchl
+
+	{ lddeConst..lddeInd1ConstLoc c|ldhlConst 1|addhlde -> ldhlConst..ldhlInd1ConstLoc c|inchl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction1 = ldhlConst) AND (previousAddress1 = 1) AND
+		(lddeConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction2ToHL;
+		emitSimple0inchl
+
+	{ lddeConst..lddeInd1ConstLoc c|ldhlConst 2|addhlde -> ldhlConst..ldhlInd1ConstLoc c|inchl|inchl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction1 = ldhlConst) AND (previousAddress1 = 2) AND
+		(lddeConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction2ToHL;
+		emitSimple0inchl_inchl
+
+	{ ldhlConst 1|lddeConst..lddeInd1ConstLoc c|addhlde -> ldhlConst..ldhlInd1ConstLoc c|inchl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 = 1) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		emitSimple0inchl
+
+	{ ldhlConst 2|lddeConst..lddeInd1ConstLoc c|addhlde -> ldhlConst..ldhlInd1ConstLoc c|inchl|inchl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 = 2) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		emitSimple0inchl_inchl
+
+	{ ldhlConst -1|addhlde OR lddeConst 1|subhlde OR lddeConst -1|addhlde -> dechl}
+	ELSIF	(currentInstruction = addhlde) AND
+		((previousInstruction1 = ldhlConst) OR (previousInstruction1 = lddeConst)) AND
+		(previousAddress1 = -1) OR
+		(currentInstruction = subhlde) AND
+		(previousInstruction1 = lddeConst) AND (previousAddress1 = 1)
+	THEN	goBackOne;
+		emitSimple0dechl
+
+	{ ldhlConst -2|addhlde OR lddeConst 2|subhlde OR lddeConst -2|addhlde -> dechl|dechl}
+	ELSIF	(currentInstruction = addhlde) AND
+		((previousInstruction1 = ldhlConst) OR (previousInstruction1 = lddeConst)) AND
+		(previousAddress1 = -2) OR
+		(currentInstruction = subhlde) AND
+		(previousInstruction1 = lddeConst) AND (previousAddress1 = 2)
+	THEN	goBackOne;
+		emitSimple0dechl_dechl
+
+	{ lddeConst..lddeInd1ConstLoc c|ldhlConst -1|addhlde -> ldhlConst..ldhlInd1ConstLoc c|dechl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction1 = ldhlConst) AND (previousAddress1 = -1) AND
+		(lddeConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction2ToHL;
+		emitSimple0dechl
+
+	{ lddeConst..lddeInd1ConstLoc c|ldhlConst -2|addhlde -> ldhlConst..ldhlInd1ConstLoc c|dechl|dechl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction1 = ldhlConst) AND (previousAddress1 = -2) AND
+		(lddeConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction2ToHL;
+		emitSimple0dechl_dechl
+
+	{ ldhlConst -1|lddeConst..lddeInd1ConstLoc c|addhlde -> ldhlConst..ldhlInd1ConstLoc c|dechl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 = -1) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		emitSimple0dechl
+
+	{ ldhlConst -2|lddeConst..lddeInd1ConstLoc c|addhlde -> ldhlConst..ldhlInd1ConstLoc c|dechl|dechl }
+	ELSIF	(currentInstruction = addhlde) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 = -2) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		emitSimple0dechl_dechl
+
+	{ lddeConst 1|ldhlConst..ldhlInd1ConstLoc c|subhlde -> ldhlConst..ldhlInd1ConstLoc c|dechl }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = lddeConst) AND (previousAddress2 = 1) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1;
+		emitSimple0dechl
+
+	{ lddeConst 2|ldhlConst..ldhlInd1ConstLoc c|subhlde -> ldhlConst..ldhlInd1ConstLoc c|dechl|dechl }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = lddeConst) AND (previousAddress2 = 2) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1;
+		emitSimple0dechl_dechl
+
+	{ lddeConst c1|ldhlConst..ldhlInd1ConstLoc c2|subhlde -> lddeConst -c1|ldhlConst..ldhlInd1ConstLoc c2|addhlde }
+	ELSIF	(currentInstruction = subhlde) AND
+		(previousInstruction2 = lddeConst) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimple(previousInstruction2, -previousAddress2);
+		emitSimplePreviousInstruction1;
+		emitSimple0(addhlde)
+
+	{ lddeConst c|subhlde -> lddeConst -c|addhlde }
+	ELSIF	(currentInstruction = subhlde) AND (previousInstruction1 = lddeConst)
+	THEN	goBackOne;
+		emitSimple(previousInstruction1, -previousAddress1);
+		emitSimple0(addhlde)
+
+	{ (ldhlConst or ldhlConstRel or ldhlConstChain) c1|sthl1Const c2 ->
+	  (ldhlConst or ldhlConstRel or ldhlConstChain) c2|stInd1Const c1 }
+	ELSIF	(currentInstruction = sthl1Const) AND
+		((previousInstruction1 = ldhlConst) OR (previousInstruction1 = ldhlConstRel) OR
+		 (previousInstruction1 = ldhlConstChain))
+	THEN	goBackOne;
+		emitSimpleCurrentAddress(previousInstruction1);
+		emitSimplePreviousAddress1(stInd1Const)
+
+	{ lddeConst c|mulhlde -> inline code for multiplication if 1 < c < optimizedMultiplication
+	  or resulting code is shorter than procedure call }
+	ELSIF	(currentInstruction = mulhlde) AND (previousInstruction1 = lddeConst) AND
+		(2 <<= previousAddress1) AND (
+			(previousAddress1 <<= optimizedMultiplication) OR
+			(previousAddress1 <<= 6) OR (previousAddress1 = 8) OR
+			(previousAddress1 = 16) OR (previousAddress1 = 32) OR
+			(previousAddress1 = 256)
+		)
+	THEN	goBackOne;
+		emitConstMultiplication(previousAddress1)
+
+	{ ldhlConst c|lddeConst..lddeInd1ConstLoc|mulhlde ->
+	  ldhlConst..ldhlInd1ConstLoc|inline code for multiplication if 1 < c < optimizedMultiplication
+	  or resulting code is shorter than procedure call }
+	ELSIF	(currentInstruction = mulhlde) AND (previousInstruction2 = ldhlConst) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc) AND
+		(2 <<= previousAddress2) AND (
+			(previousAddress2 <<= optimizedMultiplication) OR
+			(previousAddress2 <<= 6) OR (previousAddress2 = 8) OR
+			(previousAddress2 = 16) OR (previousAddress2 = 32) OR
+			(previousAddress2 = 256)
+		)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		emitConstMultiplication(previousAddress2)
+
+	{ lddeConst 2|udivhlde -> div2hl }
+	ELSIF	(currentInstruction = udivhlde) AND (previousInstruction1 = lddeConst) AND
+		(previousAddress1 = 2)
+	THEN	goBackOne;
+		emitSimple0(div2hl)
+
+	{ lddeConst 2|ldhlConst..ldhlInd1ConstLoc|udivhlde -> ldhlConst..ldhlInd1ConstLoc|div2hl }
+	ELSIF	(currentInstruction = udivhlde) AND
+		(previousInstruction2 = lddeConst) AND (previousAddress2 = 2) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1;
+		emitSimple0(div2hl)
+
+	{ lddeConst c|(andhlde OR orhlde) -> andhlConst OR orhlConst (if c < 256) }
+	ELSIF	((currentInstruction = andhlde) OR (currentInstruction = orhlde)) AND
+		(previousInstruction1 = lddeConst) AND (previousAddress1 <<= 255)
+	THEN	goBackOne;
+		emitSimplePreviousAddress1(currentInstruction + (andhlConst - andhlde))
+
+	{ ldhlConst c|lddeConst..lddeInd1ConstLoc|(andhlde OR orhlde) ->
+	  ldhlConst..ldhlInd1ConstLoc|(andhlConst OR orhlConst) (if c < 256) }
+	ELSIF	((currentInstruction = andhlde) OR (currentInstruction = orhlde)) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 <<= 255) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		emitSimplePreviousAddress2(currentInstruction + (andhlConst - andhlde))
+
+	{ boolnot|boolnot -> epsilon }
+	ELSIF	(currentInstruction = boolnot) AND (previousInstruction1 = boolnot)
+	THEN	goBackOne
+
+	{ derefhl1|sthl1Const -> sthl1Opt }
+	ELSIF	(currentInstruction = sthl1Const) AND (previousInstruction1 = derefhl1)
+	THEN	goBackOne;
+		emitSimpleCurrentAddress(sthl1Opt)
+
+	{ derefhl1|sthl1ConstRel -> sthl1OptRel }
+	ELSIF	(currentInstruction = sthl1ConstRel) AND (previousInstruction1 = derefhl1)
+	THEN	goBackOne;
+		emitSimpleCurrentAddress(sthl1OptRel)
+
+	{ derefhl1|sthl1ConstChain -> sthl1OptChain }
+	ELSIF	(currentInstruction = sthl1ConstChain) AND (previousInstruction1 = derefhl1)
+	THEN	goBackOne;
+		emitSimpleCurrentAddress(sthl1OptChain)
+
+	{ lddeConst 0|ldhlConst..ldhlInd1ConstLoc c|(addhlde or subhlde or orhlde) -> ldhlConst..ldhlInd1ConstLoc c }
+	ELSIF	((currentInstruction = addhlde) OR (currentInstruction = subhlde) OR
+		(currentInstruction = orhlde)) AND
+		(previousInstruction2 = lddeConst) AND (previousAddress2 = 0) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emit(previousInstruction1, previousAddress1) { Try again }
+
+	{ ldhlConst 0|lddeConst..lddeInd1ConstLoc c|(addhlde or orhlde) -> ldhlConst..ldhlInd1ConstLoc c }
+	ELSIF	((currentInstruction = addhlde) OR (currentInstruction = orhlde)) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 = 0) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc)
+	THEN	goBackTwo;
+		emitPreviousInstruction1ToHL { Try again }
+
+	{ lddeConst 0|addhlde or orhlde -> epsilon }
+	ELSIF	((currentInstruction = addhlde) OR (currentInstruction = orhlde)) AND
+		(previousInstruction1 = lddeConst)  AND (previousAddress1 = 0)
+	THEN	goBackOne
+
+	{ ldhlConst 0|addhlde or orhlde -> exhlde }
+	ELSIF	((currentInstruction = addhlde) OR (currentInstruction = orhlde)) AND
+		(previousInstruction1 = ldhlConst) AND (previousAddress1 = 0)
+	THEN	goBackOne;
+		emit0exhlde { Try again }
+
+	{ (lddeIndConst..lddeIndConstChain or lddeInd1Const..lddeInd1ConstChain) c1|
+	  (ldhlConst..ldhlConstLoc or ldhlIndConstLoc or ldhlInd1ConstLoc) c2|
+	  (addhlde or mulhlde or andhlde or orhlde or cmpeq..cmpugx) ->
+	  (ldhlIndConst..ldhlIndConstChain or ldhlInd1Const..ldhlInd1ConstChain) c1|
+	  (lddeConst..lddeConstLoc or lddeIndConstLoc or lddeInd1ConstLoc) c2|
+	  (addhlde or mulhlde or andhlde or orhlde or cmpeq or cmpneq or cmpSwap(cmplt..cmpugx))				}
+	ELSIF	((lddeIndConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeInd1ConstChain) AND
+		(previousInstruction2 <> lddeIndConstLoc) AND
+		 ((ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlConstLoc) OR
+		  (previousInstruction1 = ldhlIndConstLoc) OR (previousInstruction1 = ldhlInd1ConstLoc))
+		 OR
+		 (lddeIndConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstChain) AND
+		 (previousInstruction1 <> lddeIndConstLoc) AND
+		 ((ldhlConst <<= previousInstruction2) AND (previousInstruction2 <<= ldhlConstLoc) OR
+		  (previousInstruction2 = ldhlIndConstLoc) OR (previousInstruction2 = ldhlInd1ConstLoc))
+		)
+		AND
+		((currentInstruction = addhlde) OR (currentInstruction = mulhlde) OR
+		 (currentInstruction = andhlde) OR (currentInstruction = orhlde) OR
+		 (cmpeq <<= currentInstruction) AND (currentInstruction <<= cmpugx))
+	THEN	goBackTwo;
+		IF	(lddeIndConst <<= previousInstruction2) AND (previousInstruction2 <<= lddeIndConstChain)
+		THEN	emitSimplePreviousInstruction2ToHL;
+			emitSimplePreviousInstruction1ToDE
+		ELSE	emitSimplePreviousInstruction2ToDE;
+			emitSimplePreviousInstruction1ToHL
+		ENDIF;
+		IF	(cmplt <<= currentInstruction) AND (currentInstruction <<= cmpugx)
+		THEN	emit0cmpSwap
+		ELSE	emit0(currentInstruction)
+		ENDIF
+
+	{ exhlde|ldhlConst..ldhlInd1ConstLoc c|exhlde -> lddeConst..lddeInd1ConstLoc c }
+	ELSIF	(currentInstruction = exhlde) AND (previousInstruction2 = exhlde) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToDE
+
+	{ lddeIndConst..lddeIndConstChain c|exhlde -> exhlde|ldhlIndConst..ldhlIndConstChain c }
+	ELSIF	(currentInstruction = exhlde) AND
+		(lddeIndConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeIndConstChain)
+	THEN	goBackOne;
+		emitSimple0(exhlde);
+		emitSimplePreviousInstruction1ToHL
+
+	{ lddeConst 0|ldhlConst..ldhlInd1ConstLoc c|(cmpeq or cmpneq) -> ldhlConst..ldhlInd1ConstLoc c|(cmpeq0hl or intToBool) }
+	ELSIF	((currentInstruction = cmpeq) OR (currentInstruction = cmpneq)) AND
+		(ldhlConst <<= previousInstruction1) AND (previousInstruction1 <<= ldhlInd1ConstLoc) AND
+		(previousInstruction2 = lddeConst) AND (previousAddress2 = 0)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1;
+		GOTO emitOptimizedCompare
+
+	{ ldhlConst 0|lddeConst..lddeInd1ConstLoc c|(cmpeq or cmpneq) -> ldhlConst..ldhlInd1ConstLoc c|(cmpeq0hl or intToBool) }
+	ELSIF	((currentInstruction = cmpeq) OR (currentInstruction = cmpneq)) AND
+		(lddeConst <<= previousInstruction1) AND (previousInstruction1 <<= lddeInd1ConstLoc) AND
+		(previousInstruction2 = ldhlConst) AND (previousAddress2 = 0)
+	THEN	goBackTwo;
+		emitSimplePreviousInstruction1ToHL;
+		GOTO emitOptimizedCompare
+
+	{ lddeConst 0|(cmpeq or cmpneq) -> cmpeq0hl or intToBool }
+	ELSIF	((currentInstruction = cmpeq) OR (currentInstruction = cmpneq)) AND
+		(previousInstruction1 = lddeConst) AND (previousAddress1 = 0)
+	THEN	goBackOne;
+emitOptimizedCompare:
+		IF	currentInstruction = cmpeq
+		THEN	emitSimple0(cmpeq0hl)
+		ELSE	emitSimple0(intToBool)
+		ENDIF
+
+	{ Regular append }
+	ELSE	emitSimpleCurrentAddress(currentInstruction)
+	ENDIF
+	END emit;
+
+PROCEDURE emit0(WORD instruction);
+	BEGIN
+	emit(instruction:[1], 0)
+	END emit0;
+
+PROCEDURE emit_ldhlConstRel_symbolEntryValue;
+	BEGIN
+	emit(ldhlConstRel, symbolEntryValue)
+	END emit_ldhlConstRel_symbolEntryValue;
+
+PROCEDURE emit_ldhlConst_symbolEntryValue;
+	BEGIN
+	emit(ldhlConst, symbolEntryValue)
+	END emit_ldhlConst_symbolEntryValue;
+
+PROCEDURE emitByte(WORD theByte);
+	BEGIN
+	appendBitsRelFile9(theByte:[1]);
+	programCounter := programCounter + 1;
+	compilationUnitContainsCode := true
+	END emitByte;
+
+PROCEDURE emitWord(WORD theWord);
+	BEGIN
+	emitByte(theWord[0]:[1]);
+	emitByte(theWord[1]:[1])
+	END emitWord;
+
+PROCEDURE emitWordRelativeAlways(WORD address);
+	BEGIN
+	appendBitsRelFile(101B, 3);
+	appendWordRelFile(address);
+	programCounter := programCounter + 2
+	END emitWordRelativeAlways;
+
+PROCEDURE emitWordRelative(WORD address);
+	BEGIN
+	IF	address = 0
+	THEN	emitWord(0)
+	ELSE	emitWordRelativeAlways(address)
+	ENDIF
+	END emitWordRelative;
+
+PROCEDURE updateChain(WORD chainHeaderP);
+	BEGIN
+	emitWordRelative(chainHeaderP^:[2]);
+	chainHeaderP^:[2] := programCounter - 2
+	END updateChain;
+
+PROCEDURE emitCurrentInstructionAddress;
+	BEGIN
+	emitWord(currentInstructionAddress)
+	END emitCurrentInstructionAddress;
+
+PROCEDURE emitCurrentInstructionAddressChained;
+	BEGIN
+	updateChain(currentInstructionAddress)
+	END emitCurrentInstructionAddressChained;
+
+PROCEDURE emitCurrentInstructionAddressRelativeAlways;
+	BEGIN
+	emitWordRelativeAlways(currentInstructionAddress)
+	END emitCurrentInstructionAddressRelativeAlways;
+
+PROCEDURE emitCurrentInstructionAddressRelative;
+	BEGIN
+	emitWordRelative(currentInstructionAddress)
+	END emitCurrentInstructionAddressRelative;
+
+PROCEDURE emitEmptySpace(WORD size);
+	BEGIN
+	WHILE	size <> 0 DO
+		emitByte(0);
+		size := size - 1
+	ENDWHILE
+	END emitEmptySpace;
+
+PROCEDURE emitLDDEConst;				{ LD DE,Const		}
+	BEGIN
+	emitByte(011H)
+	END emitLDDEConst;
+
+PROCEDURE emitXORA;					{ XOR A			}
+	BEGIN
+	emitByte(0AFH)
+	END emitXORA;
+
+PROCEDURE emitCALLConst;				{ CALL Const		}
+	BEGIN
+	emitByte(0CDH)
+	END emitCALLConst;
+
+PROCEDURE emitCALLExternal(WORD chainHeaderP);		{ CALL Const		}
+	BEGIN
+	emitCALLConst;
+	updateChain(chainHeaderP)
+	END emitCALLExternal;
+
+PROCEDURE emitJPConst;					{ JP Const		}
+	BEGIN
+	emitByte(0C3H)
+	END emitJPConst;
+
+PROCEDURE emitJPConstExternal(WORD chainHeaderP);	{ JP Const		}
+	BEGIN
+	emitJPConst;
+	updateChain(chainHeaderP)
+	END emitJPConstExternal;
+
+PROCEDURE emitLDIndConstL;				{ LD A,L|LD (Const),A	}
+	BEGIN
+	emitWord(0327DH)
+	END emitLDIndConstL;
+
+PROCEDURE emitLDIndConstHL;				{ LD (Const),HL		}
+	BEGIN
+	emitByte(022H)
+	END emitLDIndConstHL;
+
+PROCEDURE flushPeepHoleBuffer;
+	STATIC WORD counter;
+{$ISTABEGIN.INC}
+	STATIC WORD oldProgramCounter;
+{$ISTAEND.INC}
+
+{	PROCEDURE showOptimization;
+		BEGIN
+		printInt(lineNumber);
+		printChar(' ');
+		printIntHex(programCounter + 0103H);
+		printLn
+		END showOptimization;
+
+
+	PROCEDURE showOptimizationHL;
+		BEGIN
+		IF	hlValueValid2
+		THEN	printChar('H');
+			printChar(' ');
+			showOptimization
+		ENDIF
+		END showOptimizationHL;
+
+	PROCEDURE showOptimizationDE;
+		BEGIN
+		printChar('D');
+		printChar(' ');
+		showOptimization
+		END showOptimizationDE;}
+
+	PROCEDURE emitByteCurrentInstructionAddress;
+		BEGIN
+		emitByte(currentInstructionAddress)		{ emitByte only uses lower byte }
+		END emitByteCurrentInstructionAddress;
+
+	PROCEDURE emitByteCurrentInstructionAddressPlus1;
+		BEGIN
+		emitByte(currentInstructionAddress[1])		{ emitByte only uses lower byte }
+		END emitByteCurrentInstructionAddressPlus1;
+
+	PROCEDURE emitByteCurrentInstructionAddress1;
+		BEGIN
+		emitByte(currentInstructionAddress + 1)		{ emitByte only uses lower byte }
+		END emitByteCurrentInstructionAddress1;
+
+	PROCEDURE emitLDBCCurrentInstructionAddress;		{ LD BC,Const		}
+		BEGIN
+		emitByte(001H);
+		emitCurrentInstructionAddress
+		END emitLDBCCurrentInstructionAddress;
+
+	PROCEDURE emitLDHLConst;				{ LD HL,Const		}
+		BEGIN
+		emitByte(021H)
+		END emitLDHLConst;
+
+	PROCEDURE emitLDHLIndConst;				{ LD HL,(Const)		}
+		BEGIN
+		emitByte(02AH)
+		END emitLDHLIndConst;
+
+	PROCEDURE emitLDDEIndConst;				{ LD DE,(Const)		}
+		BEGIN
+		emitWord(05BEDH)
+		END emitLDDEIndConst;
+
+	PROCEDURE emitLDHA;					{ LD H,A		}
+		BEGIN
+		emitByte(067H)
+		END emitLDHA;
+
+	PROCEDURE emitLDDA;					{ LD D,A		}
+		BEGIN
+		emitByte(057H)
+		END emitLDDA;
+
+	PROCEDURE emitPOPDE;					{ POP DE		}
+		BEGIN
+		emitByte(0D1H)
+		END emitPOPDE;
+
+	PROCEDURE emitADDHLDE;					{ ADD HL,DE		}
+		BEGIN
+		emitByte(019H)
+		END emitADDHLDE;
+
+	PROCEDURE emitEXDEHL;					{ EX DE,HL		}
+		BEGIN
+		emitByte(0EBH)
+		END emitEXDEHL;
+
+	PROCEDURE emitPUSHIX;					{ PUSH IX		}
+		BEGIN
+		emitWord(0E5DDH)
+		END emitPUSHIX;
+
+	PROCEDURE emitLDEIXCurrentInstructionAddress;		{ LD E,(IX+Const)	}
+		BEGIN
+		emitWord(05EDDH);
+		emitByteCurrentInstructionAddress
+		END emitLDEIXCurrentInstructionAddress;
+
+	PROCEDURE emitINCHL;					{ INC HL		}
+		BEGIN
+		emitByte(023H)
+		END emitINCHL;
+
+	PROCEDURE emitLDIndHLA;					{ LD (HL),A		}
+		BEGIN
+		emitByte(077H)
+		END emitLDIndHLA;
+
+	PROCEDURE emitLDIndHLConst;				{ LD (HL),Const		}
+		BEGIN
+		emitByte(036H)
+		END emitLDIndHLConst;
+
+	PROCEDURE emitLDIndHLCurrentInstructionAddress;		{ LD (HL),Const		}
+		BEGIN
+		emitLDIndHLConst;
+		emitByteCurrentInstructionAddress
+		END emitLDIndHLCurrentInstructionAddress;
+
+	PROCEDURE emitLDIndConstIndHL;				{ LD A,(HL)|LD (Const),A}
+		BEGIN
+		emitWord(0327EH)
+		END emitLDIndConstIndHL;
+
+	PROCEDURE emitLDConstIndA;				{ LD (Const),A		}
+		BEGIN
+		emitByte(032H)
+		END emitLDConstIndA;
+
+	PROCEDURE emitLDDH_LDEL;				{ LD D,H|LD E,L		}
+		BEGIN
+		emitWord(05D54H)
+		END emitLDDH_LDEL;
+
+	PROCEDURE emitLDEByteCurrentInstructionAddress;		{ LD E,Const		}
+		BEGIN
+		emitByte(01EH);
+		emitByteCurrentInstructionAddress
+		END emitLDEByteCurrentInstructionAddress;
+
+	PROCEDURE emitLDDECurrentInstructionAddress;		{ LD DE,Const		}
+		BEGIN
+		emitLDDEConst;
+		emitCurrentInstructionAddress
+		END emitLDDECurrentInstructionAddress;
+
+	PROCEDURE emitLDDECurrentInstructionAddressJPConst;	{ LD DE,Const1|JP Const2}
+		BEGIN
+		emitLDDECurrentInstructionAddress;		{ LD DE,Const1		}
+		emitJPConst
+		END emitLDDECurrentInstructionAddressJPConst;
+
+	PROCEDURE stInd1ConstInstruction;
+		BEGIN
+		IF	currentInstructionAddress[0]:[1] = 0
+		THEN	emitLDIndHLA				{ LD (HL),A		}
+		ELSE	emitLDIndHLCurrentInstructionAddress	{ LD (HL),Const		}
+		ENDIF;
+		invalidateVariableDE
+		END stInd1ConstInstruction;
+
+	PROCEDURE store1Instruction;
+		BEGIN
+		emitByte(073H);					{ LD (HL),E		}
+		{ <HL> could point to a variable currently stored in <DE>
+		  make sure that <DE> is not used later }
+		invalidateVariableDE
+		END store1Instruction;
+
+	PROCEDURE emitLDIXConst;
+		BEGIN
+		emitWord(075DDH);				{ LD (IX+Const),L	}
+		emitByteCurrentInstructionAddress
+		END emitLDIXConst;
+
+	BEGIN { flushPeepHoleBuffer }
+	thisInstruction := 0;
+	WHILE thisInstruction <> instructionPointer DO
+		currentInstructionAddress := peepHoleBuffer[thisInstruction + addressOffset]:[2];
+		currentInstructionOpCode := peepHoleBuffer[thisInstruction]:[1];
+
+		IF	(deValue = currentInstructionAddress) AND deValueValid AND
+			(currentInstructionOpCode = lddeInstruction + (ldhlConst - lddeConst))
+		THEN	emitWord(06B62H); { LD H,D|LD L,E }
+			invalidateHL
+		ELSIF	(hlValue = currentInstructionAddress) AND hlValueValid AND
+			(currentInstructionOpCode = ldhlInstruction + (lddeConst - ldhlConst))
+		THEN	emitLDDH_LDEL; { LD D,H|LD E,L }
+			invalidateDE
+		ELSIF	((hlValueValid = false) OR
+			 (hlValue <> currentInstructionAddress) OR
+			 (ldhlInstruction <> currentInstructionOpCode)) AND
+			((hlValueValid2 = false) OR
+			 (hlValue2 <> currentInstructionAddress) OR
+			 (ldhlInstruction2 <> currentInstructionOpCode)) AND
+			((deValueValid = false) OR
+			 (deValue <> currentInstructionAddress) OR
+			 (lddeInstruction <> currentInstructionOpCode))
+		THEN
+{$ISTABEGIN.INC}
+			oldProgramCounter := programCounter;
+{$ISTAEND.INC}
+			CASE currentInstructionOpCode OF
+			ldhlConst:	temp := thisInstruction + 3;
+					IF	(temp <> instructionPointer) AND
+						((peepHoleBuffer[temp]:[1] = sthl2ConstLoc) OR
+						 (peepHoleBuffer[temp]:[1] = sthl1ConstLoc))
+					THEN	IF	currentInstructionAddress[0]:[1] = 0
+						THEN	emitWord(077DDH); { LD (IX+Const),A }
+							emitByte(peepHoleBuffer[temp + 1]:[1])
+						ELSE	emitWord(036DDH); { LD (IX+Const1),Const2 }
+							emitByte(peepHoleBuffer[temp + 1]:[1]);
+							emitByteCurrentInstructionAddress
+						ENDIF;
+						IF	peepHoleBuffer[temp]:[1] = sthl2ConstLoc
+						THEN	IF	currentInstructionAddress[1]:[1] = 0
+							THEN	emitWord(077DDH); { LD (IX+Const+1),A }
+								emitByte(peepHoleBuffer[temp + 1]:[1] + 1)
+							ELSE	emitWord(036DDH); { LD (IX+Const1+1),Const2 }
+								emitByte(peepHoleBuffer[temp + 1]:[1] + 1);
+								emitByteCurrentInstructionAddressPlus1
+							ENDIF
+						ENDIF;
+						thisInstruction := temp;
+						invalidateHL
+					ELSE	validateHL;
+						IF	currentInstructionAddress = 0
+						THEN	emitWord(0676FH)		{ LD H,A|LD L,A		}
+						ELSE	emitLDHLConst;			{ LD HL,Const }
+							emitCurrentInstructionAddress
+						ENDIF
+					ENDIF
+			END
+			ldhlConstRel:	emitLDHLConst;					{ LD HL,Const		}
+					emitCurrentInstructionAddressRelativeAlways
+			END
+			ldhlConstChain:	emitLDHLConst;					{ LD HL,Const		}
+					emitCurrentInstructionAddressChained
+			END
+			ldhlIndConst:	emitLDHLIndConst;				{ LD HL,(Const)		}
+					emitCurrentInstructionAddress
+			END
+			ldhlIndConstRel:emitLDHLIndConst;				{ LD HL,(Const)		}
+					emitCurrentInstructionAddressRelativeAlways
+			END
+			ldhlIndConstChain:
+					emitLDHLIndConst;				{ LD HL,(Const)		}
+					emitCurrentInstructionAddressChained
+			END
+			ldhlIndConstLoc:emitWord(06EDDH);				{ LD L,(IX+Const)	}
+					emitByteCurrentInstructionAddress;
+					emitWord(066DDH);				{ LD H,(IX+Const+1)	}
+					emitByteCurrentInstructionAddress1
+			END
+			ldhlConstLoc:	emitPUSHIX;					{ PUSH IX		}
+					IF	currentInstructionAddress >> 3
+					THEN	emitWord(021C1H);			{ POP BC|LD HL,Const	}
+						emitCurrentInstructionAddress;
+						emitByte(009H)				{ ADD HL,BC		}
+					ELSE	emitByte(0E1H);				{ POP HL		}
+						counter := currentInstructionAddress;
+						{ May not modify currentInstructionAddress }
+						WHILE	counter <> 0 DO
+							emitINCHL;			{ INC HL		}
+							counter := counter - 1
+						ENDWHILE
+					ENDIF
+			END
+			ldhlInd1Const:	emitLDHLIndConst;				{ LD HL,(Const)		}
+					emitCurrentInstructionAddress;
+					emitLDHA					{ LD H,A		}
+			END
+			ldhlInd1ConstRel:
+					emitLDHLIndConst;				{ LD HL,(Const)		}
+					emitCurrentInstructionAddressRelativeAlways;
+					emitLDHA					{ LD H,A		}
+			END
+			ldhlInd1ConstChain:
+					emitLDHLIndConst;				{ LD HL,(Const)		}
+					emitCurrentInstructionAddressChained;
+					emitLDHA					{ LD H,A		}
+			END
+			ldhlInd1ConstLoc:
+					emitWord(06EDDH);				{ LD L,(IX+Const)	}
+					emitByteCurrentInstructionAddress;
+					emitLDHA					{ LD H,A		}
+			END
+			lddeConst:	IF	currentInstructionAddress = 0
+					THEN	emitWord(0575FH)			{ LD D,A|LD E,A		}
+											{ CASE depends on this	}
+					ELSE	emitLDDECurrentInstructionAddress	{ LD DE,Const		}
+					ENDIF
+			END
+			lddeConstRel:	emitLDDEConst;					{ LD DE,Const		}
+					emitCurrentInstructionAddressRelativeAlways
+			END
+			lddeConstChain:	emitLDDEConst;					{ LD DE,Const		}
+					emitCurrentInstructionAddressChained
+			END
+			lddeConstLoc:	emitPUSHIX;					{ PUSH IX		}
+					IF	currentInstructionAddress >> 5
+					THEN	emitWord(011E3H);			{ EX (SP),HL|LD DE,Const}
+						emitCurrentInstructionAddress;
+						emitADDHLDE;				{ ADD HL,DE		}
+						emitEXDEHL;				{ EX DE,HL		}
+						emitByte(0E1H)				{ POP HL		}
+					ELSE	emitPOPDE;				{ POP DE		}
+						counter := currentInstructionAddress;
+						WHILE	counter <> 0 DO
+							emitByte(013H);			{ INC DE		}
+							counter := counter - 1
+						ENDWHILE
+					ENDIF
+			END
+			lddeIndConst:	emitLDDEIndConst;				{ LD DE,(Const)		}
+					emitCurrentInstructionAddress
+			END
+			lddeIndConstRel:emitLDDEIndConst;				{ LD DE,(Const)		}
+					emitCurrentInstructionAddressRelativeAlways
+			END
+			lddeIndConstChain:
+					emitLDDEIndConst;				{ LD DE,(Const)		}
+					emitCurrentInstructionAddressChained
+			END
+			lddeIndConstLoc:emitLDEIXCurrentInstructionAddress;		{ LD E,(IX+Const)	}
+					emitWord(056DDH);				{ LD D,(IX+Const+1)	}
+					emitByteCurrentInstructionAddress1
+			END
+			lddeInd1Const:	emitLDDEIndConst;				{ LD DE,(Const)		}
+					emitCurrentInstructionAddress;
+					emitLDDA					{ LD D,A		}
+			END
+			lddeInd1ConstRel:
+					emitLDDEIndConst;				{ LD DE,(Const)		}
+					emitCurrentInstructionAddressRelativeAlways;
+					emitLDDA					{ LD D,A		}
+			END
+			lddeInd1ConstChain:
+					emitLDDEIndConst;				{ LD DE,(Const)		}
+					emitCurrentInstructionAddressChained;
+					emitLDDA					{ LD D,A		}
+			END
+			lddeInd1ConstLoc:
+					emitLDEIXCurrentInstructionAddress;		{ LD E,(IX+Const)	}
+					emitLDDA					{ LD D,A		}
+			END
+			lddeInd1ConstLoc1:
+					emitLDEIXCurrentInstructionAddress		{ LD E,(IX+Const)	}
+			END
+			popde:		emitPOPDE;					{ POP DE		}
+					invalidateDE
+			END
+			pushhl:		emitByte(0E5H)					{ PUSH HL		}
+			END
+			derefhl1:	emitWord(0676EH);				{ LD L,(HL)|LD H,A	}
+					invalidateHL
+			END
+			derefhl2:	emitWord(02346H);				{ LD B,(HL)|INC HL	}
+					emitWord(06866H);				{ LD H,(HL)|LD L,B	}
+					invalidateHL
+			END
+			addhlde:	emitADDHLDE;					{ ADD HL,DE		}
+					invalidateHL
+			END
+			subhlde:	emitXORA;					{ XOR A			}
+					emitWord(052EDH);				{ SBC HL,DE		}
+					invalidateHL
+			END
+			mulhlde:	emitCALLExternal(@mulChainHeader);		{ CALL .MUL		}
+					invalidateAll
+			END
+			sdivhlde:	emitCALLExternal(@divChainHeader);		{ CALL .DIV		}
+					invalidateAll
+			END
+			udivhlde:	emitCALLExternal(@wdvChainHeader);		{ CALL .WDV		}
+					invalidateAll
+			END
+			modhlde:	emitCALLExternal(@modChainHeader);		{ CALL .MOD		}
+					invalidateAll
+			END
+			andhlde:	emitCALLExternal(@andChainHeader);		{ CALL .AND		}
+					invalidateHL { Constraint: AND does not change <DE> }
+			END
+			orhlde:		emitCALLExternal(@iorChainHeader);		{ CALL .IOR		}
+					invalidateHL { Constraint: OR does not change <DE> }
+			END
+			neghl:		emitCALLExternal(@hchChainHeader);		{ CALL .HCH		}
+					invalidateHL
+			END
+			store1:		store1Instruction				{ LD (HL),E		}
+			END
+			store2:		store1Instruction;				{ LD (HL),E		}
+					emitWord(07223H);				{ INC HL|LD (HL),D	}
+					invalidateHL
+			END
+			storen:		emitLDBCCurrentInstructionAddress;		{ LD BC,Const		}
+					emitWord(0B0EDH);				{ LDIR			}
+					invalidateAll
+			END
+			storenc:	emitLDBCCurrentInstructionAddress;		{ LD BC,Const		}
+					emitCALLExternal(@stcChainHeader);		{ CALL .STC			}
+					invalidateAll
+			END
+			setdefromhl,
+			exhlde:		emitEXDEHL;					{ EX DE,HL		}
+					swapDEHL
+			END
+			inchl:		emitINCHL;					{ INC HL		}
+					invalidateHL
+			END
+			dechl:		emitByte(02BH);					{ DEC HL		}
+					invalidateHL
+			END
+			sthl1Const:	emitLDIndConstL;				{ LD A,L|LD (Const),A	}
+					emitCurrentInstructionAddress;
+					emitXORA;					{ XOR A			}
+					invalidateDESelective1(lddeInd1Const + 256 * lddeIndConst)
+			END
+			sthl1ConstRel:	emitLDIndConstL;				{ LD A,L|LD (Const),A	}
+					emitCurrentInstructionAddressRelativeAlways;
+					emitXORA;					{ XOR A			}
+					invalidateDESelective1(lddeInd1ConstRel + 256 * lddeIndConstRel)
+			END
+			sthl1ConstChain:emitLDIndConstL;				{ LD A,L|LD (Const),A	}
+					emitCurrentInstructionAddressChained;
+					emitXORA;					{ XOR A			}
+					invalidateDESelective1(lddeInd1ConstChain + 256 * lddeIndConstChain)
+			END
+			sthl2Const:	emitLDIndConstHL;				{ LD (Const),HL		}
+					emitCurrentInstructionAddress;
+					validateHL2;
+					invalidateDESelective2(lddeInd1Const + 256 * lddeIndConst)
+			END
+			sthl2ConstRel:	emitLDIndConstHL;				{ LD (Const),HL		}
+					emitCurrentInstructionAddressRelativeAlways;
+					validateHL2;
+					invalidateDESelective2(lddeInd1ConstRel + 256 * lddeIndConstRel)
+			END
+			sthl2ConstChain:emitLDIndConstHL;				{ LD (Const),HL		}
+					emitCurrentInstructionAddressChained;
+					validateHL2;
+					invalidateDESelective2(lddeInd1ConstChain + 256 * lddeIndConstChain)
+			END
+			stInd1Const:	stInd1ConstInstruction
+			END
+			stInd2Const:	stInd1ConstInstruction;
+					emitINCHL;					{ INC HL		}
+					IF	currentInstructionAddress[1]:[1] = 0
+					THEN	emitLDIndHLA				{ LD (HL),A		}
+					ELSE	emitLDIndHLConst;			{ LD (HL),Const		}
+						emitByteCurrentInstructionAddressPlus1
+					ENDIF;
+					invalidateHL
+			END
+			div2hl:		emitWord(03CCBH);				{ SRL H			}
+					emitWord(01DCBH);				{ RR L			}
+					invalidateHL
+			END
+			dup2hl:		emitByte(029H);					{ ADD HL,HL		}
+					invalidateHL
+			END
+			mul256:		emitWord(06F65H);				{ LD H,L|LD L,A		}
+					invalidateHL
+			END
+			andhlConst:	emitWord(07D67H);				{ LD H,A|LD A,L		}
+					emitByte(0E6H);					{ AND Const		}
+					emitByteCurrentInstructionAddress;
+					emitWord(0AF6FH);				{ LD L,A|XOR A		}
+					invalidateHL
+			END
+			orhlConst:	emitWord(0F67DH);				{ LD A,L|OR Const	}
+					emitByteCurrentInstructionAddress;
+					emitWord(0AF6FH);				{ LD L,A|XOR A		}
+					invalidateHL
+			END
+			lddehl:		emitLDDH_LDEL;					{ LD D,H|LD E,L		}
+					invalidateDE
+			END
+			cmpeq:		emitCALLExternal(@ieqChainHeader)		{ CALL .IEQ		}
+					{ Constraint: ieq does not change <DE> and <HL> }
+			END
+			cmpneq:		emitCALLExternal(@ineChainHeader)		{ CALL .INE		}
+					{ Constraint: ine does not change <DE> and <HL> }
+			END
+			cmplt:		emitCALLExternal(@iltChainHeader)		{ CALL .ILT		}
+					{ Constraint: ilt does not change <DE> and <HL> }
+			END
+			cmpge:		emitCALLExternal(@igeChainHeader)		{ CALL .IGE		}
+					{ Constraint: ige does not change <DE> and <HL> }
+			END
+			cmpltx:		emitCALLExternal(@ilxChainHeader);		{ CALL .ILX		}
+					swapDEHL
+			END
+			cmpgex:		emitCALLExternal(@igxChainHeader);		{ CALL .IGX		}
+					swapDEHL
+			END
+			cmpulx:		emitCALLExternal(@ulxChainHeader);		{ CALL .ULX		}
+					swapDEHL
+			END
+			cmpugx:		emitCALLExternal(@ugxChainHeader);		{ CALL .UGX		}
+					swapDEHL
+			END
+			cmpeq0hl:	emitCALLExternal(@e0hChainHeader)		{ CALL .E0H		}
+			END
+			cmpuge:		emitCALLExternal(@ugeChainHeader)		{ CALL .UGE		}
+			END
+			cmpult:		emitCALLExternal(@ultChainHeader)		{ CALL .ULT		}
+			END
+			cmpNeq:		emitLDBCCurrentInstructionAddress;		{ LD BC,Const		}
+					emitCALLExternal(@neqChainHeader)		{ CALL .NEQ		}
+			END
+			cmpNneq:	emitLDBCCurrentInstructionAddress;		{ LD BC,Const		}
+					emitCALLExternal(@nneChainHeader)		{ CALL .NNE		}
+			END
+			boolnot:	emitByte(03FH)					{ CCF			}
+			END
+			boolToInt:	emitCALLExternal(@btiChainHeader);		{ CALL .BTI		}
+					invalidateHL { Constraint: bti does not change <DE> }
+			END
+			intToBool:	emitCALLExternal(@itbChainHeader)		{ CALL .ITB		}
+			END
+			extopandpushhl:	emitWord(0E5E3H);				{ EX (SP),HL|PUSH HL	}
+					invalidateHL
+			END
+			dispatch:	emitCALLExternal(@dspChainHeader);		{ CALL .DSP		}
+					invalidateAll
+			END
+			jumpAbsTrue:	emitByte(0D2H);					{ JP NC,Const		}
+					emitCurrentInstructionAddressRelative
+			END
+			jumpAbsFalse:	emitByte(0DAH);					{ JP C,Const		}
+					emitCurrentInstructionAddressRelative
+			END
+			jumpAbs:	emitJPConst;					{ JP Const		}
+					emitCurrentInstructionAddressRelative;
+					invalidateAll
+			END
+			jumpAbsOpt:	IF	programCounter <<= currentInstructionAddress +
+							maxRelativeJumpDistance
+{	Only jumping back is possible in this case. For the maximal distance keep the following in mind:
+	100 JR 81 is not possible (programCounter = 100H, currentInstructionAddress = 81H)
+	100 JR 82 is possible (programCounter = 100H, currentInstructionAddress = 82H)
+	in other words: programCounter <<= currentInstructionAddress + 7EH					}
+					THEN	emitByte(018H);				{ JR Const		}
+						emitByte(currentInstructionAddress - programCounter - 1)
+					ELSE	emitJPConst;				{ JP Const		}
+						emitCurrentInstructionAddressRelative
+					ENDIF;
+					invalidateAll
+			END
+			jumpAbsFalseOpt:
+					IF	programCounter <<= currentInstructionAddress +
+							maxRelativeJumpDistance
+					THEN	emitByte(038H);				{ JR C,Const		}
+						emitByte(currentInstructionAddress - programCounter - 1)
+					ELSE	emitByte(0DAH);				{ JP C,Const		}
+						emitCurrentInstructionAddressRelative
+					ENDIF
+			END
+			labelDefinition:appendBitsRelFile9(100_1100_01B);
+					appendWordRelFile(currentInstructionAddress);
+					invalidateAll
+			END
+			sthl1Opt:	emitLDIndConstIndHL;				{ LD A,(HL)|LD (Const),A}
+					emitCurrentInstructionAddress;
+					emitXORA;					{ XOR A			}
+					invalidateDESelective1(lddeInd1Const + 256 * lddeIndConst)
+			END
+			sthl1OptRel:	emitLDIndConstIndHL;				{ LD A,(HL)|LD (Const),A}
+					emitCurrentInstructionAddressRelativeAlways;
+					emitXORA;					{ XOR A			}
+					invalidateDESelective1(lddeInd1ConstRel + 256 * lddeIndConstRel)
+			END
+			sthl1OptChain:	emitLDIndConstIndHL;				{ LD A,(HL)|LD (Const),A}
+					emitCurrentInstructionAddressChained;
+					emitXORA;					{ XOR A			}
+					invalidateDESelective1(lddeInd1ConstChain + 256 * lddeIndConstChain)
+			END
+			loadElse:	emitLDDEConst;					{ LD DE,Const		}
+					emitCurrentInstructionAddressRelativeAlways;
+					emitByte(0D5H);					{ PUSH DE		}
+					invalidateDE
+			END
+			ldbcConst:	emitLDBCCurrentInstructionAddress		{ LD BC,Const		}
+			END
+			ldbConst:	emitByte(006H);					{ LD B, Const		}
+					emitByteCurrentInstructionAddress
+			END
+			caseJump:	emitCALLExternal(@indChainHeader);		{ CALL .IND		}
+					invalidateAll
+			END
+			entryParNVar0:	emitCALLExternal(@ep0ChainHeader);		{ CALL .EP0		}
+					invalidateAll
+			END
+			entryParNVarM:	IF	currentInstructionAddress[1]:[1] = 0FFH
+					THEN	emitLDEByteCurrentInstructionAddress;	{ LD E,Const		}
+						emitCALLExternal(@epvChainHeader)	{ CALL .EPV		}
+					ELSE	emitLDDECurrentInstructionAddress;	{ LD DE,Const		}
+						emitCALLExternal(@epxChainHeader)	{ CALL .EPX		}
+					ENDIF;
+					invalidateAll
+			END
+			returnPar0Var0:	emitByte(0C9H);					{ RET			}
+					invalidateAll
+			END
+			returnParNVar0:	IF	currentInstructionAddress[1]:[1] = 0
+					THEN	emitLDEByteCurrentInstructionAddress;	{ LD E,Const		}
+						emitJPConstExternal(@rp0ChainHeader)	{ JP .RP0		}
+					ELSE	emitLDDECurrentInstructionAddressJPConst;{ LD DE,Const|JP .RX0	}
+						updateChain(@rx0ChainHeader)
+					ENDIF
+			END
+			returnPar2Var0:	emitJPConstExternal(@r20ChainHeader)		{ JP .R20		}
+			END
+			returnPar4Var0:	emitJPConstExternal(@r40ChainHeader)		{ JP .R40		}
+			END
+			returnPar0VarM:	IF	currentInstructionAddress[1]:[1] = 0
+					THEN	emitLDEByteCurrentInstructionAddress;	{ LD E,Const		}
+						emitJPConstExternal(@r0vChainHeader)	{ JP .R0V		}
+					ELSE	emitLDDECurrentInstructionAddressJPConst; { LD DE,Const|JP .R0X	}
+						updateChain(@r0xChainHeader)
+					ENDIF
+			END
+			returnParNVarM:	emitLDDECurrentInstructionAddressJPConst;	{ LD DE,Const|JP .RPV	}
+					updateChain(@rpvChainHeader)
+			END
+			returnParXVarM:	emitLDDECurrentInstructionAddressJPConst;	{ LD DE,Const|JP .RXV	}
+					updateChain(@rxvChainHeader)
+			END
+			sthl1ConstLoc:	emitLDIXConst;					{ LD (IX+Const),L	}
+					invalidateDESelective1(lddeInd1ConstLoc + 256 * lddeIndConstLoc)
+			END
+			sthl2ConstLoc:	emitLDIXConst;					{ LD (IX+Const),L	}
+					emitWord(074DDH);				{ LD (IX+Const+1),H	}
+					emitByteCurrentInstructionAddress1;
+					invalidateDESelective2(lddeInd1ConstLoc + 256 * lddeIndConstLoc)
+			END
+			pushn:		emitLDHLConst;					{ LD HL,Const		}
+					emitWord(-currentInstructionAddress);
+					emitWord(0F939H);				{ ADD HL,SP|LD SP,HL	}
+					emitEXDEHL;					{ EX DE,HL		}
+					emitLDBCCurrentInstructionAddress;		{ LD BC,Const		}
+					emitWord(0B0EDH);				{ LDIR			}
+					invalidateAll
+			END
+			push1:		emitWord(0E565H);				{ LD H,L|PUSH HL	}
+					emitByte(033H);					{ INC SP		}
+					invalidateHL
+			END
+			callProc:	emitCALLConst;					{ CALL Const		}
+					emitCurrentInstructionAddressRelativeAlways;
+					invalidateAll
+			END
+			callProcChain:	emitCALLConst;					{ CALL Const		}
+					emitCurrentInstructionAddressRelative;
+					invalidateAll
+			END
+			pushaf:		emitByte(0F5H)					{ PUSH AF		}
+			END
+			cmpbeq:		emitCALLExternal(@beqChainHeader);		{ CALL .BEQ		}
+					invalidateAll
+			END
+			cmpbne:		emitCALLExternal(@bneChainHeader);		{ CALL .BNE		}
+					invalidateAll
+			END
+			inc1:		emitByte(034H)					{ INC (HL)		}
+			END
+			dec1:		emitByte(035H)					{ DEC (HL)		}
+			END
+			inc1l:		emitWord(034DDH);				{ INC (IX+Const)	}
+					emitByteCurrentInstructionAddress
+			END
+			dec1l:		emitWord(035DDH);				{ DEC (IX+Const)	}
+					emitByteCurrentInstructionAddress
+			END
+			ldind1hlconst:	IF	currentInstructionAddress:[1] = 0
+					THEN	emitLDIndHLA				{ LD (HL),A		}
+					ELSE	emitLDIndHLCurrentInstructionAddress	{ LD (HL),Const		}
+					ENDIF
+			END
+			ldind1hl0:	emitLDConstIndA;				{ LD (Const),A		}
+					emitCurrentInstructionAddress
+			END
+			ldind1hl0Rel:	emitLDConstIndA;				{ LD (Const),A		}
+					emitCurrentInstructionAddressRelativeAlways
+			END
+			ldind1hl0Chain:	emitLDConstIndA;				{ LD (Const),A		}
+					emitCurrentInstructionAddressChained
+			END
+{ Debug only		ELSE		error(92); { Internal compiler error }
+					printInt(peepHoleBuffer[thisInstruction]:[1]);
+					printLn
+}			ENDCASE
+{$ISTABEGIN.INC}
+			;execTable[4*currentInstructionOpCode]:[2] := execTable[4*currentInstructionOpCode]:[2] + 1;
+			execTable[4*currentInstructionOpCode + 2]:[2] := execTable[4*currentInstructionOpCode + 2]:[2] +
+				programCounter - oldProgramCounter;
+{$ISTAEND.INC}
+		ENDIF;
+		IF	(ldhlConstRel <<= currentInstructionOpCode) AND
+			(currentInstructionOpCode <<= ldhlInd1ConstLoc)
+		THEN	validateHL
+		ENDIF;
+		IF	(lddeConst <<= currentInstructionOpCode) AND
+			(currentInstructionOpCode <<= lddeInd1ConstLoc) OR
+			(currentInstructionOpCode = lddeInd1ConstLoc1)
+		THEN	validateDE
+		ENDIF;
+		thisInstruction := thisInstruction + 3
+	ENDWHILE;
+	instructionPointer := 0;
+	programCounter2 := programCounter - 2
+	END flushPeepHoleBuffer;
+
+PROCEDURE emitAndFlush(WORD instruction, address);
+	BEGIN
+	emit(instruction:[1], address);
+	flushPeepHoleBuffer
+	END emitAndFlush;
+
+PROCEDURE emit0AndFlush(WORD instruction);
+	BEGIN
+	emit0(instruction:[1]);
+	flushPeepHoleBuffer
+	END emit0AndFlush;
+
+PROCEDURE defineLabel(WORD theLabel);
+	BEGIN
+	IF	theLabel <> 0
+	THEN	emitAndFlush(labelDefinition, theLabel)		{ Let linker do the patching }
+	ENDIF
+	END defineLabel;
+
+PROCEDURE linkExternals;
+	STATIC WORD dots = '..';
+	BEGIN
+	ip := firstChainHeaderAddress;
+	jp := @externalTable;
+	WHILE ip <<= lastChainHeaderAddress DO
+		kp := ip^:[2];
+		IF	kp <> 0
+		THEN	appendBitsRelFile9(100_0110_01B);	{ Chain external program counter relative }
+			appendWordRelFile(kp);			{ Head of chain }
+			appendBitsRelFile(100B, 3);
+			dots[1]:[1] := jp^:[1];
+			appendWordRelFile(dots);
+			jp := jp + 1;
+			appendWordRelFile(jp^:[2]);
+			jp := jp + 2
+		ELSE	jp := jp + 3
+		ENDIF;
+		ip := ip + 2
+	ENDWHILE
+	END linkExternals;
+
+{ The core of the compiler is built on top of a recursive descent parser }
+{ ConstantExpression ::= [ "+" | "-" ] ConstantTerm { ( "+" | "-" | "OR" ) ConstantTerm }
+	Postcondition:	resultP points to result of the expression (WORD)
+			isRelocatableP points to false		iff expression does not contain any @-operator
+						 true		iff expression is a correct relocatable expression
+								(e.g. 2 + @a + 7 would be ok)
+ An error message is generated if the expression could not be assigned either true or false.
+}
+
+PROCEDURE parseConstantExpression(WORD resultP, isRelocatableP);
+	WORD accumulator;
+	BYTE negative, accuRel;
+	STATIC WORD right;
+
+	{ ConstantTerm ::= ConstantFactor { ( "*" | "/" | "DIV" | "MOD" | "AND" ) ConstantFactor } }
+	PROCEDURE parseConstantTerm(WORD isRelocatableP);
+		WORD accumulator;
+		BYTE operator, isRelocatable;
+		STATIC WORD right;
+
+		{ ConstantFactor ::= UnsignedInteger | "@" VariableIdentifier |ÊConstantIdentifier |
+					"(" ConstantExpression ")" }
+		PROCEDURE parseConstantFactor(WORD resultP, isRelocatableP);
+			BEGIN
+			isRelocatableP^:[1] := false;
+			resultP^:[2] := 0;
+			IF	symbol = unsignedIntegerSymbol
+			THEN	resultP^:[2] := symbolValue;
+				getSymbol
+			ELSIF	symbol = addressOfSymbol
+			THEN	getSymbol;
+				IF	(symbol = globalAbsoluteVariableIdentifierSymbol) OR
+					(symbol = globalRelativeVariableIdentifierSymbol)
+				THEN	IF	symbol = globalRelativeVariableIdentifierSymbol
+					THEN	isRelocatableP^:[1] := true
+					ENDIF;
+					resultP^:[2] := (symbolEntryP + valueOffset)^:[2]
+				ELSE	error(60) { Global variable expected }
+				ENDIF;
+				getSymbol
+			ELSIF	symbol >>= identifierSymbol
+			THEN	IF	symbol = constantIdentifierSymbol
+				THEN	IF	(symbolEntryP + sizeOffset)^:[1] <> false
+					THEN	error(61) { Recursive constant declaration }
+					ENDIF;
+					isRelocatableP^:[1] := (symbolEntryP + sizeOffset + 1)^:[1];
+					resultP^:[2] := (symbolEntryP + valueOffset)^:[2]
+				ELSE	error(62) { Constant expected }
+				ENDIF;
+				getSymbol
+			ELSIF	symbol = leftRoundParenthesesSymbol
+			THEN	getSymbol;
+				parseConstantExpression(resultP, isRelocatableP);
+				verifyRightRoundParenthesesSymbol { ")" expected }
+			ELSE	error(63); { Constant factor cannot start with this symbol }
+				{ Use constraint eofSymbol..staticSymbol must be sequential in this order }
+				WHILE (symbol << eofSymbol) OR (symbol >> staticSymbol) DO
+					getSymbol
+				ENDWHILE
+			ENDIF
+			END parseConstantFactor;
+
+		BEGIN { parseConstantTerm }
+		parseConstantFactor(@accumulator, isRelocatableP);
+		WHILE	(timesSymbol <<= symbol) AND (symbol <<= andSymbol) DO
+			operator := symbol:[1];
+			getSymbol;
+			parseConstantFactor(@right, @isRelocatable);
+			CASE operator OF
+			timesSymbol:	accumulator := accumulator * right	END
+			divideSymbol:	accumulator := accumulator / right	END
+			divSymbol:	accumulator := accumulator DIV right	END
+			modSymbol:	accumulator := accumulator MOD right	END
+			andSymbol:	accumulator := accumulator AND right	END
+			ENDCASE;
+			IF	right = 0
+			THEN	CASE operator OF
+				divideSymbol, divSymbol:	error(38) { Division by 0 } END
+				modSymbol:			error(39) { Modulo with 0 } END
+				ENDCASE
+			ENDIF;
+			IF	isRelocatableP^:[1] OR isRelocatable
+			THEN	error97; { Illegal use of @-operator in constant expression }
+				isRelocatableP^:[1] := false
+			ENDIF
+		ENDWHILE;
+		RETURN accumulator
+		END parseConstantTerm;
+
+	BEGIN { parseConstantExpression }
+	checkHeap;
+	negative := false;
+	IF	symbol = plusSymbol
+	THEN	getSymbol
+	ELSIF	symbol = minusSymbol
+	THEN	negative := true;
+		getSymbol
+	ENDIF;
+	accumulator := parseConstantTerm(@accuRel);
+	IF	negative <> false
+	THEN	accumulator := -accumulator;
+		IF	accuRel <> false
+		THEN	error97; { Illegal use of @-operator in constant expression }
+			accuRel := false
+		ENDIF
+	ENDIF;
+	LOOP	{ Termination: exits if non-operator found }
+		CASE symbol OF
+		plusSymbol:
+			getSymbol;
+			right := parseConstantTerm(@temp);
+			IF	temp:[1] <> false
+			THEN	IF	accuRel = false
+				THEN	accuRel := true
+				ELSE	error97;	{ Illegal use of @-operator in constant expression }
+					accuRel := false
+				ENDIF
+			ENDIF;
+			accumulator := accumulator + right
+		END
+		minusSymbol:
+			getSymbol;
+			right := parseConstantTerm(@temp);
+			IF	temp:[1] <> false
+			THEN	IF	accuRel = false
+				THEN	error97		{ Illegal use of @-operator in constant expression }
+				ENDIF;
+				accuRel := false
+			ENDIF;
+			accumulator := accumulator - right
+		END
+		orSymbol:
+			getSymbol;
+			right := parseConstantTerm(@temp);
+			IF	accuRel OR temp:[1]
+			THEN	error97;		{ Illegal use of @-operator in constant expression }
+				accuRel := false
+			ENDIF;
+			accumulator := accumulator OR right
+		END
+		ELSE	EXIT
+		ENDCASE
+	ENDLOOP;
+	resultP^:[2] := accumulator;
+	isRelocatableP^:[1] := accuRel
+	END parseConstantExpression;
+
+{ ExportDeclaration	::= "EXPORT" SingleExport { SingleExport }
+  SingleExport		::= Identifier ( "," | ";" ) }
+PROCEDURE parseExportDeclaration;
+	BEGIN
+	WHILE symbol >>= identifierSymbol DO
+		IF	symbol = identifierSymbol
+		THEN	appendBitsRelFile(100_0000B, 7);	{ Entry symbol					}
+			appendNameRelFile(symbolStartP);
+			enterSymbol(exportedEntryIdentifierSymbol)
+		ELSIF	symbol = exportedEntryIdentifierSymbol
+		THEN	error41					{ Identifier already declared			}
+		ELSE	error(34)				{ Identifier must be variable or procedure	}
+		ENDIF;
+		getSymbol;
+		verifyCommaOrSemicolon
+	ENDWHILE
+	END parseExportDeclaration;
+
+PROCEDURE parseVariable(WORD variableSizeP);						FORWARD;
+PROCEDURE parseStatementSequence(WORD exitLabelP, continueLabel, endsWithReturn);	FORWARD;
+PROCEDURE parseBlock(WORD name, entrySymbolP, totalParameterSize, localVariableChainP);	FORWARD;
+PROCEDURE parseProcedureCall(WORD endsWithReturn);					FORWARD;
+PROCEDURE parseExpression(WORD expressionSizeP, coerce);				FORWARD;
+
+PROCEDURE parseConstantExpressionNoRelocatable(WORD resultP);
+	BEGIN
+	parseConstantExpression(resultP, @temp);
+	IF	temp:[1] <> false
+	THEN	error(93)						{ Constant has relocatable component }
+	ENDIF
+	END parseConstantExpressionNoRelocatable;
+
+PROCEDURE parseExplicitSize(WORD resultSizeP, defaultValue);
+	BEGIN
+	parseConstantExpressionNoRelocatable(resultSizeP);
+	IF	resultSizeP^:[2] = 0
+	THEN	error(21);					{ Size cannot be zero }
+		resultSizeP^:[2] := defaultValue
+	ENDIF;
+	verifyRightSquareParenthesesSymbol			{ "]" expected }
+	END parseExplicitSize;
+
+PROCEDURE parseSizeExpression(WORD resultSizeP, defaultValue);
+	BEGIN
+	resultSizeP^:[2] := defaultValue;			{ Initialize with default	}
+	IF	symbol = colonSymbol
+	THEN	getSymbol;
+		verifyExpectedSymbol(leftSquareParenthesesSymbol + 256 * 46);	{ "[" expected			}
+		parseExplicitSize(resultSizeP, defaultValue)
+	ENDIF
+	END parseSizeExpression;
+
+PROCEDURE parsePointerSequence;
+	STATIC WORD indexSize;
+	BEGIN
+	WHILE (symbol = pointerSymbol) OR (symbol = leftSquareParenthesesSymbol) DO
+		IF	symbol = pointerSymbol
+		THEN	getSymbol;
+			emit0derefhl2
+		ELSE	getSymbol;
+			emit0pushhl;
+			parseExpression(@indexSize, wordTypeSize);
+			IF	indexSize <> wordTypeSize
+			THEN	error71				{ Numerical value expected	}
+			ENDIF;
+			emit0popde;
+			emit0(addhlde);
+			verifyRightSquareParenthesesSymbol	{ "]" expected			}
+		ENDIF
+	ENDWHILE
+	END parsePointerSequence;
+
+{ Expression ::= SimpleExpression
+  [ ( "=" | "<>" | "<" | ">" | "<=" | ">=" | ">>" | "<<" | ">>=" | "<<=" ) SimpleExpression ]
+  post condition for code generation:
+	for arithmetic expression: HL contains result if size is 1 or 2, otherwise HL constains address
+}
+PROCEDURE parseExpression(WORD expressionSizeP, coerce);
+	WORD	saveInstructionPointer, deferredAddress, doneLabel, size1, size2;
+	BYTE	comparator, deferredInstruction;
+
+	PROCEDURE coerceFromOrToBoolean(WORD coerce, resultSizeP);
+		BEGIN
+		IF	coerce <> anyTypeSize
+		THEN	IF	(coerce = booleanTypeSize) AND (resultSizeP^:[2] = wordTypeSize)
+			THEN	emit0(intToBool);
+				resultSizeP^:[2] := booleanTypeSize
+			ELSIF	(coerce = wordTypeSize) AND (resultSizeP^:[2] = booleanTypeSize)
+			THEN	emit0(boolToInt);
+				resultSizeP^:[2] := wordTypeSize
+			ENDIF
+		ENDIF
+		END coerceFromOrToBoolean;
+
+	{ SimpleExpression ::= [ "+" | "-" ] Term { ( "+" | "-" | "OR" ) Term } }
+	PROCEDURE parseSimpleExpression(WORD simpleExpressionSizeP, coerce);
+		WORD	saveInstructionPointer, deferredAddress, trueLabel, sizeTerm2, sizeTerm;
+		BYTE	leadingSymbol, instruction, deferredInstruction;
+
+		PROCEDURE parseSecond(WORD deferredInstruction, deferredAddress, theProcedure, sizeP);
+			BEGIN
+			IF	deferredInstruction:[1] <> nop
+			THEN	theProcedure(sizeP, wordTypeSize);
+				emit(deferredInstruction:[1], deferredAddress)
+			ELSE	emit0pushhl;
+				theProcedure(sizeP, wordTypeSize);
+				emit0popde
+			ENDIF
+			END parseSecond;
+
+		{ Term ::= Factor { ( "*" | "/" | "DIV" | "MOD" | "AND" ) Factor } }
+		PROCEDURE parseTerm(WORD termSizeP, coerce);
+			WORD	saveInstructionPointer, deferredAddress, falseLabel, sizeFactor2, sizeFactor;
+			BYTE	deferredInstruction, instruction;
+
+			{ Factor ::= "(" Expression ")"
+			    [ "^" { ("^" | "[" Expression "]") } [ ":" "[" ConstantExpression "]" ] ] |
+			  ConstantIdentifier | "@" ( Variable | Procedure ) |
+			  UnsignedInteger | "NOT" Factor | ProcedureCall | Variable }
+			PROCEDURE parseFactor(WORD factorSizeP, coerce);
+				STATIC WORD factorSize;
+				BEGIN { parseFactor }
+				factorSizeP^:[2] := wordTypeSize; { Default result }
+				IF	symbol = leftRoundParenthesesSymbol
+				THEN	getSymbol;
+					parseExpression(factorSizeP, coerce);
+					verifyRightRoundParenthesesSymbol; { ")" expected }
+					IF	symbol = pointerSymbol
+					THEN	IF	factorSizeP^:[2] <> wordTypeSize
+						THEN	error(76) { Numeric factor expected }
+						ENDIF;
+						getSymbol;
+						parsePointerSequence;
+						parseSizeExpression(factorSizeP, wordTypeSize);
+						IF	factorSizeP^:[2] = byteTypeSize
+						THEN	emit0(derefhl1);
+							factorSizeP^:[2] := wordTypeSize
+						ELSIF	factorSizeP^:[2] = wordTypeSize
+						THEN	emit0derefhl2
+						ENDIF
+					ENDIF
+				ELSIF	symbol = constantIdentifierSymbol
+				THEN	IF	symbolEntrySize[1]:[1] <> false
+					THEN	emit_ldhlConstRel_symbolEntryValue
+					ELSE	emit_ldhlConst_symbolEntryValue
+					ENDIF;
+					getSymbol
+				ELSIF	symbol = addressOfSymbol
+				THEN	getSymbol;
+					IF	symbol = procedureIdentifierSymbol
+					THEN	emit_ldhlConstRel_symbolEntryValue;
+						getSymbol
+					ELSE	parseVariable(@factorSize)
+					ENDIF
+				ELSIF	symbol = unsignedIntegerSymbol
+				THEN	emit(ldhlConst, symbolValue);
+					getSymbol
+				ELSIF	symbol = notSymbol
+				THEN	getSymbol;
+					parseFactor(@factorSize, booleanTypeSize);
+					emit0boolnot;
+					IF	factorSize <> booleanTypeSize
+					THEN	error(72) { Boolean expression expected }
+					ENDIF;
+					factorSizeP^:[2] := booleanTypeSize
+				ELSIF	(procedureIdentifierSymbol <<= symbol) AND
+					(symbol <<= externalProcedureIdentifierSymbol)
+				THEN	parseProcedureCall(false)
+				ELSE	parseVariable(@factorSize);
+					IF	factorSize = byteTypeSize { Replacing by CASE adds 2 bytes }
+					THEN	emit0(derefhl1)
+					ELSIF	factorSize = wordTypeSize
+					THEN	emit0derefhl2
+					ELSE	factorSizeP^:[2] := factorSize
+					ENDIF
+				ENDIF;
+				coerceFromOrToBoolean(coerce, factorSizeP)
+				END parseFactor;
+
+			BEGIN { parseTerm }
+			saveInstructionPointer := instructionPointer;
+			parseFactor(@sizeFactor, anyTypeSize);
+			falseLabel := 0; { Anchor of chain }
+			IF	(symbol = andSymbol) AND (sizeFactor = booleanTypeSize)
+			THEN	emit0AndFlush(jumpAbsFalse);
+				falseLabel := programCounter2 { Now correctly set }
+			ENDIF;
+			WHILE	(timesSymbol <<= symbol) AND (symbol <<= andSymbol) DO
+				temp := peepHoleBuffer[saveInstructionPointer]:[1];
+				deferredInstruction := nop; { Default }
+				IF	(instructionPointer = saveInstructionPointer + 3) AND
+					(ldhlConst <<= temp) AND (temp <<= ldhlInd1ConstLoc)
+				THEN	deferredInstruction := temp + (lddeConst - ldhlConst);
+					deferredAddress := peepHoleBuffer[saveInstructionPointer + 1]:[2];
+					goBackOne
+				ENDIF;
+				IF	symbol = andSymbol
+				THEN	getSymbol;
+					IF	sizeFactor = wordTypeSize
+					THEN	parseSecond(deferredInstruction, deferredAddress,
+							@parseFactor, @sizeFactor2);
+						emit0(andhlde)
+					ELSE	parseFactor(@sizeFactor2, booleanTypeSize);
+						IF	symbol = andSymbol
+						THEN	emitAndFlush(jumpAbsFalse, falseLabel);
+							falseLabel := programCounter2 { Now correctly set }
+						ENDIF
+					ENDIF;
+					IF	sizeFactor <> sizeFactor2
+					THEN	error05 { Type mismatch }
+					ENDIF
+				ELSE	instruction := symbol + (mulhlde - timesSymbol);
+					getSymbol;
+					parseSecond(deferredInstruction, deferredAddress, @parseFactor, @sizeFactor2);
+					IF	instruction <> mulhlde
+					THEN	emit0exhlde
+					ENDIF;
+					emit0(instruction);
+					IF	(sizeFactor <> wordTypeSize) OR (sizeFactor2 <> wordTypeSize)
+					THEN	error05 { Type mismatch }
+					ENDIF;
+					sizeFactor := wordTypeSize
+				ENDIF
+			ENDWHILE;
+			defineLabel(falseLabel);
+			termSizeP^:[2] := sizeFactor;
+			coerceFromOrToBoolean(coerce, termSizeP)
+			END parseTerm;
+
+		BEGIN { parseSimpleExpression }
+		saveInstructionPointer := instructionPointer;
+		leadingSymbol := symbol;
+		IF	(symbol = minusSymbol) OR (symbol = plusSymbol)
+		THEN	getSymbol;
+			parseTerm(@sizeTerm, wordTypeSize)
+		ELSE	parseTerm(@sizeTerm, anyTypeSize)
+		ENDIF;
+		IF	(sizeTerm <> wordTypeSize) AND
+			((leadingSymbol = minusSymbol) OR (leadingSymbol = plusSymbol))
+		THEN	error71 { Numerical value expected }
+		ENDIF;
+		IF	leadingSymbol = minusSymbol
+		THEN	emit0(neghl)
+		ENDIF;
+		trueLabel := 0; { Anchor of chain }
+		IF	(symbol = orSymbol) AND (sizeTerm = booleanTypeSize)
+		THEN	emit0AndFlush(jumpAbsTrue);
+			trueLabel := programCounter2 { Now correctly set }
+		ENDIF;
+		WHILE (plusSymbol <<= symbol) AND (symbol <<= orSymbol) DO
+			temp := peepHoleBuffer[saveInstructionPointer]:[1];
+			deferredInstruction := nop; { Default }
+			IF	(instructionPointer = saveInstructionPointer + 3) AND
+				(ldhlConst <<= temp) AND (temp <<= ldhlInd1ConstLoc)
+			THEN	deferredInstruction := temp + (lddeConst - ldhlConst);
+				deferredAddress := peepHoleBuffer[saveInstructionPointer + 1]:[2];
+				goBackOne
+			ENDIF;
+			IF	symbol = orSymbol
+			THEN	getSymbol;
+				IF	sizeTerm = wordTypeSize
+				THEN	parseSecond(deferredInstruction, deferredAddress, @parseTerm, @sizeTerm2);
+					emit0(orhlde)
+				ELSE	parseTerm(@sizeTerm2, booleanTypeSize);
+					IF	symbol = orSymbol
+					THEN	emitAndFlush(jumpAbsTrue, trueLabel);
+						trueLabel := programCounter2 { Now correctly set }
+					ENDIF
+				ENDIF;
+				IF	sizeTerm <> sizeTerm2
+				THEN	error05 { Type mismatch }
+				ENDIF
+			ELSE	IF	symbol = plusSymbol
+				THEN	instruction := addhlde
+				ELSE	instruction := subhlde
+				ENDIF;
+				getSymbol;
+				parseSecond(deferredInstruction, deferredAddress, @parseTerm, @sizeTerm2);
+				IF	instruction = subhlde
+				THEN	emit0exhlde
+				ENDIF;
+				emit0(instruction);
+				IF	(sizeTerm <> wordTypeSize) OR (sizeTerm2 <> wordTypeSize)
+				THEN	error05 { Type mismatch }
+				ENDIF;
+				sizeTerm := wordTypeSize
+			ENDIF
+		ENDWHILE;
+		defineLabel(trueLabel);
+		simpleExpressionSizeP^:[2] := sizeTerm;
+		coerceFromOrToBoolean(coerce, simpleExpressionSizeP)
+		END parseSimpleExpression;
+
+	BEGIN { parseExpression }
+	checkHeap;
+	saveInstructionPointer := instructionPointer;
+	parseSimpleExpression(@size1, anyTypeSize);
+	IF	(lessUnsignedSymbol <<= symbol) AND (symbol <<= equalSymbol)
+	THEN	comparator := symbol;
+		getSymbol;
+		IF	size1 = booleanTypeSize
+		THEN	doneLabel := 0;
+			CASE comparator OF
+			equalSymbol:		emit0(pushaf);
+						parseSimpleExpression(@size2, booleanTypeSize);
+						emit0(cmpbeq)
+			END
+			notEqualSymbol:		emit0(pushaf);
+						parseSimpleExpression(@size2, booleanTypeSize);
+						emit0(cmpbne)
+			END
+			lessSignedSymbol,
+			lessUnsignedSymbol:	emit0boolnot;
+						emit0AndFlush(jumpAbsFalse);
+						doneLabel := programCounter2;
+						parseSimpleExpression(@size2, booleanTypeSize)
+			END
+			lessOrEqualSignedSymbol,
+			lessOrEqualUnsignedSymbol:
+						emit0boolnot;
+						emit0AndFlush(jumpAbsTrue);
+						doneLabel := programCounter2;
+						parseSimpleExpression(@size2, booleanTypeSize)
+			END
+			greaterSignedSymbol,
+			greaterUnsignedSymbol:	emit0AndFlush(jumpAbsFalse);
+						doneLabel := programCounter2;
+						parseSimpleExpression(@size2, booleanTypeSize);
+						emit0boolnot
+			END
+			greaterOrEqualSignedSymbol,
+			greaterOrEqualUnsignedSymbol:
+						emit0AndFlush(jumpAbsTrue);
+						doneLabel := programCounter2;
+						parseSimpleExpression(@size2, booleanTypeSize);
+						emit0boolnot
+			END
+			ENDCASE;
+			defineLabel(doneLabel);
+			IF	size2 <> booleanTypeSize
+			THEN	error(79) { Simple boolean expression expected }
+			ENDIF
+		ELSE	temp := peepHoleBuffer[saveInstructionPointer]:[1];
+			IF	(instructionPointer = saveInstructionPointer + 3) AND
+				(ldhlConst <<= temp) AND (temp <<= ldhlInd1ConstLoc)
+			THEN	deferredInstruction := temp + (lddeConst - ldhlConst);
+				deferredAddress := peepHoleBuffer[saveInstructionPointer + 1]:[2];
+				goBackOne;
+				parseSimpleExpression(@size2, wordTypeSize);
+				emit(deferredInstruction, deferredAddress)
+			ELSE	emit0pushhl;
+				parseSimpleExpression(@size2, wordTypeSize);
+				emit0popde
+			ENDIF;
+			IF	size1 <> size2
+			THEN	error05 { Type mismatch }
+			ENDIF;
+			IF	size1 >> wordTypeSize
+			THEN	CASE comparator OF
+				equalSymbol:		emit(cmpNeq, size1)	END
+				notEqualSymbol:		emit(cmpNneq, size1)	END
+				ELSE			error(17) { Can only compare numeric or boolean values }
+				ENDCASE
+			ELSE	CASE comparator OF
+				equalSymbol:		emit0(cmpeq)	END
+				notEqualSymbol:		emit0(cmpneq)	END
+				greaterSignedSymbol:	emit0(cmplt)	END
+				greaterOrEqualSignedSymbol:
+							emit0exhlde;
+							emit0(cmpge)	END
+				lessSignedSymbol:	emit0exhlde;
+							emit0(cmplt)	END
+				lessOrEqualSignedSymbol:
+							emit0(cmpge)	END
+				greaterUnsignedSymbol:	emit0cmpult	END
+				greaterOrEqualUnsignedSymbol:
+							emit0exhlde;
+							emit0cmpuge	END
+				lessUnsignedSymbol:	emit0exhlde;
+							emit0cmpult	END
+				lessOrEqualUnsignedSymbol:
+							emit0cmpuge	END
+				ENDCASE
+			ENDIF
+		ENDIF;
+		expressionSizeP^:[2] := booleanTypeSize
+	ELSE	expressionSizeP^:[2] := size1
+	ENDIF;
+	coerceFromOrToBoolean(coerce, expressionSizeP)
+	END parseExpression;
+
+
+{ Variable ::= VariableIdentifier { "^" | "[" Expression "]" } [ ":" "[" ConstantExpression "]" ]
+  postcondition for code generation:	put the address of the variable into HL
+					variableSizeP points to size of pointed to variable
+}
+PROCEDURE parseVariable(WORD variableSizeP);
+	WORD	variableSize, saveInstructionPointer, deferredAddress, indexSize;
+	BYTE	deferredInstruction;
+	BEGIN
+	saveInstructionPointer := instructionPointer;
+	variableSize := symbolEntrySize;
+	CASE symbol OF
+	globalRelativeVariableIdentifierSymbol, staticParameterIdentifierSymbol:
+		emit_ldhlConstRel_symbolEntryValue
+	END
+	globalExternalVariableIdentifierSymbol:
+		emit(ldhlConstChain, symbolEntryP + valueOffset)
+	END
+	globalAbsoluteVariableIdentifierSymbol:
+		emit_ldhlConst_symbolEntryValue
+	END
+	localVariableIdentifierSymbol, parameterIdentifierSymbol:
+		IF	symbolEntryP << currentScope
+		THEN	error(70) { Variable must be local or global }
+		ENDIF;
+		emit(ldhlConstLoc, symbolEntryValue)
+	END
+	ELSE	error(59) { Variable expected }
+	ENDCASE;
+	getSymbol;
+	WHILE (symbol = pointerSymbol) OR (symbol = leftSquareParenthesesSymbol) DO
+		IF	symbol = pointerSymbol
+		THEN	getSymbol;
+			emit0derefhl2;
+			variableSize := wordTypeSize
+		ELSE	getSymbol;
+			temp := peepHoleBuffer[saveInstructionPointer]:[1];
+			IF	(instructionPointer = saveInstructionPointer + 3) AND
+				(ldhlConst <<= temp) AND (temp <<= ldhlInd1ConstLoc)
+			THEN	deferredInstruction := temp + (lddeConst - ldhlConst);
+				deferredAddress := peepHoleBuffer[saveInstructionPointer + 1]:[2];
+				goBackOne;
+				parseExpression(@indexSize, wordTypeSize);
+				emit(deferredInstruction, deferredAddress)
+			ELSE	emit0pushhl;
+				parseExpression(@indexSize, wordTypeSize);
+				emit0popde
+			ENDIF;
+			IF	indexSize <> wordTypeSize
+			THEN	error71				{ Numerical value expected	}
+			ENDIF;
+			emit0(addhlde);
+			verifyRightSquareParenthesesSymbol;	{ "]" expected			}
+			variableSize := wordTypeSize
+		ENDIF
+	ENDWHILE;
+	parseSizeExpression(variableSizeP, variableSize)
+	END parseVariable;
+
+{ AssignmentOrVariableProcedureCall ::= ( Variable |
+    "(" Expression ")" "^" { ("^" | "[" Expression "]") } [ ":" "[" ConstantExpression "]" ] )
+  ( ":=" Expression | "(" Expression { "," Expression } ")" ) }
+PROCEDURE parseAssignmentOrVariableProcedureCall;
+	LABEL	finisParseAssignmentOrVariableProcedureCall;
+	BYTE	deferredInstruction;
+	WORD	deferredAddress, expressionSize, variableSize;
+
+	PROCEDURE parseVariableProcedureCall;
+		BEGIN
+		invalidateAll;
+		getSymbol;
+		emit0derefhl2;
+		emit0AndFlush(pushhl);
+		LOOP	{ Termination: commas are removed otherwise exit }
+			IF	symbol = rightRoundParenthesesSymbol
+			THEN	EXIT
+			ENDIF;
+			parseExpression(@temp, wordTypeSize);
+			IF	temp <> wordTypeSize
+			THEN	error71 { Numerical value expected }
+			ENDIF;
+			emit0AndFlush(extopandpushhl);
+			IF	symbol = commaSymbol
+			THEN	getSymbol
+			ELSE	EXIT
+			ENDIF
+		ENDLOOP;
+		verifyRightRoundParenthesesSymbol; { ")" expected }
+		emit0(dispatch)
+		END parseVariableProcedureCall;
+
+	BEGIN { parseAssignmentOrVariableProcedureCall }
+	IF	symbol = leftRoundParenthesesSymbol
+	THEN	getSymbol;
+		parseExpression(@variableSize, wordTypeSize);
+		verifyRightRoundParenthesesSymbol; { ")" expected }
+		verifyExpectedSymbol(pointerSymbol + 256 * 06); { "^" expected }
+		IF	variableSize <> wordTypeSize
+		THEN	error(76) { Numeric factor expected }
+		ENDIF;
+		parsePointerSequence;
+		parseSizeExpression(@variableSize, wordTypeSize)
+	ELSE	parseVariable(@variableSize)
+	ENDIF;
+	CASE symbol OF
+	assignSymbol:			getSymbol						END
+	equalSymbol:			getSymbol;
+					error(03) { Use ":=" instead of "=" }			END
+	leftRoundParenthesesSymbol:	parseVariableProcedureCall;
+					GOTO finisParseAssignmentOrVariableProcedureCall	END
+	ELSE				error(15) { ":=" expected }
+	ENDCASE;
+	IF	(instructionPointer = 3) AND
+		((peepHoleBuffer[0]:[1] <<= ldhlIndConstChain) OR
+		 (peepHoleBuffer[0]:[1] = ldhlIndConstLoc) AND (variableSize <<= wordTypeSize))
+	THEN	deferredInstruction := peepHoleBuffer[0]:[1];
+		deferredAddress := peepHoleBuffer[addressOffset]:[2];
+		instructionPointer := 0
+	ELSE	deferredInstruction := nop;
+		emit0pushhl { Address where to put result }
+	ENDIF;
+	parseExpression(@expressionSize, wordTypeSize);
+	IF	variableSize = booleanTypeSize
+	THEN	error(04) { Cannot assign boolean value }
+	ELSIF	(variableSize <> expressionSize) AND (variableSize * expressionSize <> 2) AND
+		((variableSize <<= 2) OR (expressionSize >> 2))
+	THEN	error05 { Type mismatch }
+	ENDIF;
+	IF	deferredInstruction = nop
+	THEN	emit0popde; { HL := result, DE := destination }
+		CASE variableSize OF
+		booleanTypeSize, byteTypeSize:
+			emit0exhlde;
+			emit0(store1)	END
+		wordTypeSize:
+			emit0exhlde;
+			emit0(store2)	END
+		ELSE	IF	expressionSize = variableSize
+			THEN	emit(storen, variableSize)
+			ELSE	emit(storenc, variableSize)
+			ENDIF
+		ENDCASE
+	ELSIF	deferredInstruction = ldhlConstLoc
+	THEN	emit(variableSize + (sthl1ConstLoc - 1), deferredAddress)
+	ELSIF	variableSize >> wordTypeSize
+	THEN	emit(deferredInstruction + (lddeConst - ldhlConst), deferredAddress);
+		IF	expressionSize = variableSize
+		THEN	emit(storen, variableSize)
+		ELSE	emit(storenc, variableSize)
+		ENDIF
+	ELSIF	(ldhlConst <<= deferredInstruction) AND (deferredInstruction <<= ldhlConstChain)
+	THEN	emit(2 * deferredInstruction + variableSize + (sthl1Const - 2 * ldhlConst - 1), deferredAddress)
+	ELSE	emit(deferredInstruction + (lddeIndConst - ldhlIndConst), deferredAddress);
+		emit0exhlde;
+		emit0((store1 - 1) + variableSize)
+	ENDIF;
+{{psco}showPeepHoleBuffer;}
+finisParseAssignmentOrVariableProcedureCall:
+	flushPeepHoleBuffer
+	END parseAssignmentOrVariableProcedureCall;
+
+{ ProcedureCall ::= Identifier [ "(" Expression { "," Expression } ")" ] }
+{ Returns true iff RET statement following this procedure call may be skipped }
+PROCEDURE parseProcedureCall(WORD endsWithReturn);
+	WORD	currentParameterP, selfP, entryAddress, expectedSize, receivedSize;
+
+	{ Emit offset ip with chain address in jp }
+	PROCEDURE emitOffsetChained;
+		BEGIN
+		appendBitsRelFile9(100_1001_00B); { External add offset absolute }
+		appendWordRelFile(ip);
+		updateChain(jp)
+		END emitOffsetChained;
+
+	PROCEDURE consumeExtraParameterList;
+		BEGIN
+		getSymbol; { Get rid of "," or ")" }
+		LOOP	{ Termination: either remove symbols or exit }
+			parseExpression(@temp, wordTypeSize);
+			CASE symbol OF
+			commaSymbol:			getSymbol	END
+			rightRoundParenthesesSymbol:	getSymbol;
+							EXIT		END
+			eofSymbol:			EXIT		END
+			ENDCASE
+		ENDLOOP
+		END consumeExtraParameterList;
+
+	BEGIN { parseProcedureCall }
+	entryAddress := symbolEntryValue;
+	selfP := symbolEntryP;
+	currentParameterP := symbolEntrySize;
+	getSymbol;
+	IF	currentParameterP = 0
+	THEN	IF	symbol = leftRoundParenthesesSymbol
+		THEN	error(16); { Too many parameters }
+			consumeExtraParameterList
+		ENDIF
+	ELSE	IF	symbol = leftRoundParenthesesSymbol
+		THEN	getSymbol;
+			LOOP	{ Termination: exit if too few or too many parameters }
+				parseExpression(@receivedSize, wordTypeSize);
+				expectedSize := (currentParameterP + sizeOffset)^:[2];
+				IF	(receivedSize <> expectedSize) AND (expectedSize * receivedSize <> 2)
+				THEN	error(19) { Type of actual parameter does not match formal parameter }
+				ENDIF;
+				ip := (currentParameterP + valueOffset)^:[2];
+				IF	currentParameterP^:[1] = staticParameterIdentifierSymbol
+				THEN	IF	(forwardProcedureIdentifierSymbol <<= selfP^:[1]) AND
+						(selfP^:[1] <<= externalProcedureIdentifierSymbol)
+					THEN	flushPeepHoleBuffer;
+						jp := selfP + valueOffset;
+						IF	expectedSize = byteTypeSize
+						THEN	emitLDIndConstL;	{ LD A,L|LD (Const),A		}
+							emitOffsetChained;
+							emitXORA		{ XOR A				}
+						ELSIF	expectedSize = wordTypeSize
+						THEN	emitLDIndConstHL;	{ LD (Const),HL			}
+							emitOffsetChained
+						ELSE	emitLDDEConst;		{ LD DE,Const			}
+							emitOffsetChained;
+							emit(storen, expectedSize)
+						ENDIF
+					ELSIF	expectedSize = byteTypeSize
+					THEN	emit(sthl1ConstRel, ip)
+					ELSIF	expectedSize = wordTypeSize
+					THEN	emit(sthl2ConstRel, ip)
+					ELSE	emit(lddeConstRel, ip);
+						emit(storen, expectedSize)
+					ENDIF
+				ELSIF	expectedSize = byteTypeSize
+				THEN	emit0(push1)
+				ELSIF	expectedSize = wordTypeSize
+				THEN	emit0pushhl
+				ELSE	emit0(setdefromhl);
+					emit(pushn, expectedSize)
+				ENDIF;
+				flushPeepHoleBuffer;
+				currentParameterP := (currentParameterP + nextEntryOffset)^:[2];
+				IF	currentParameterP = selfP
+				THEN	IF	symbol = commaSymbol
+					THEN	error(16);			{ Too many parameters		}
+						consumeExtraParameterList
+					ENDIF;
+					EXIT
+				ENDIF;
+				IF	symbol = rightRoundParenthesesSymbol
+				THEN	error(07);				{ Too few parameter		}
+					EXIT
+				ENDIF;
+				verifyExpectedSymbol(commaSymbol + 256 * 55)	{ ")" or "," expected		}
+			ENDLOOP;
+			verifyRightRoundParenthesesSymbol			{ ")" expected			}
+		ELSE	error(09)						{ Parameter list expected	}
+		ENDIF
+	ENDIF;
+	IF	(endsWithReturn:[1] <> false) AND (symbol = endSymbol) AND ((selfP + sizeOffset)^:[2] = 0)
+	{	Optimization to replace CALL with JP resp. JR is possible under the following conditions:
+		1. Statement sequence must end with RET statement
+		2. Call must be last statement of this sequence
+		3. Procedure being called must not have parameters (If it has parameters, the access to
+		   these parameters assumes a return address on the stack. The procedure being called may
+		   or may not have local variables. The access to the local variables does not make
+		   assumptions about a return address having been pushed on the stack.
+	}
+	THEN	IF	selfP^:[1] = procedureIdentifierSymbol
+		THEN	emitAndFlush(jumpAbsOpt, entryAddress)
+		ELSE	emitAndFlush(jumpAbs, (selfP + valueOffset)^:[2]);
+			(selfP + valueOffset)^:[2] := programCounter2
+		ENDIF;
+		RETURN true	{ Indicate to caller that RET statement may be skipped	}
+	ENDIF;
+	IF	selfP^:[1] = procedureIdentifierSymbol
+	THEN	emitAndFlush(callProc, entryAddress)
+	ELSE	emitAndFlush(callProcChain, (selfP + valueOffset)^:[2]);
+		(selfP + valueOffset)^:[2] := programCounter2
+	ENDIF;
+	RETURN false		{ Definitely cannot skip RET statement			}
+	END parseProcedureCall;
+
+{ WhileStatement ::= "WHILE" Expression "DO" StatementSequence "ENDWHILE" }
+PROCEDURE parseWhileStatement;
+	WORD topLabel, bottomLabel;
+	BEGIN
+	getSymbol;
+	topLabel := programCounter;
+	invalidateAll;
+	parseExpression(@temp, booleanTypeSize);
+	IF	temp <> booleanTypeSize
+	THEN	error10 { Boolean expression expected }
+	ENDIF;
+	emit0AndFlush(jumpAbsFalse);
+	bottomLabel := programCounter2;				{ Remember for later patching	}
+	verifyExpectedSymbol(doSymbol + 256 * 11);		{ DO expected			}
+	parseStatementSequence(@bottomLabel, topLabel, false);
+	verifyExpectedSymbol(endwhileSymbol + 256 * 18);	{ ENDWHILE expected		}
+	emit(jumpAbsOpt, topLabel);
+	defineLabel(bottomLabel)
+	END parseWhileStatement;
+
+{ GotoStatement ::= "GOTO" Identifier }
+PROCEDURE parseGotoStatement;
+	BEGIN
+	getSymbol;
+	IF	symbol = labelIdentifierSymbol
+	THEN	IF	symbolEntryP >>= currentScope
+		THEN	IF	symbolEntrySize = false	{ Back chain			}
+			THEN	emitAndFlush(jumpAbs, symbolEntryValue);
+				(symbolEntryP + valueOffset)^:[2] := programCounter2
+			ELSE	emitAndFlush(jumpAbsOpt, symbolEntryValue)
+			ENDIF
+		ELSE	error(28)			{ Cannot jump out of block	}
+		ENDIF
+	ELSIF	symbol >>= identifierSymbol
+	THEN	error(32)				{ Illegal label			}
+	ELSE	error31					{ Identifier expected		}
+	ENDIF;
+	getSymbol
+	END parseGotoStatement;
+
+{ IfStatement ::= "IF" Expression "THEN" StatementSequence
+  { "ELSIF" Expression "THEN" StatementSequence } [ "ELSE" StatementSequence ] "ENDIF" }
+PROCEDURE parseIfStatement(WORD exitLabelP, continueLabel);
+	WORD	elseLabel, doneLabel;
+	BEGIN
+	getSymbol;
+	doneLabel := 0;
+	LOOP	{ Termination: exit if ENDIF or neither ELSE or ELSIF detected }
+		parseExpression(@temp, booleanTypeSize);
+		IF	temp <> booleanTypeSize
+		THEN	error10						{ Boolean expression expected	}
+		ENDIF;
+		emit0AndFlush(jumpAbsFalse);
+		elseLabel := programCounter2;				{ Remember for later patching	}
+		verifyExpectedSymbol(thenSymbol + 256 * 12);		{ THEN expected			}
+		parseStatementSequence(exitLabelP, continueLabel, false);
+		IF	symbol <> endifSymbol				{ More to come			}
+		THEN	emitAndFlush(jumpAbs, doneLabel);
+			doneLabel := programCounter2
+		ENDIF;
+		defineLabel(elseLabel);
+		IF	symbol = endifSymbol
+		THEN	getSymbol;
+			EXIT
+		ENDIF;
+		IF	symbol = elseSymbol
+		THEN	getSymbol;
+			parseStatementSequence(exitLabelP, continueLabel, false);
+			verifyExpectedSymbol(endifSymbol + 256 * 20);	{ ENDIF expected		}
+			EXIT
+		ENDIF;
+		IF	symbol = elsifSymbol
+		THEN	getSymbol
+		ELSE	error(02);					{ ENDIF or ELSIF expected	}
+			EXIT
+		ENDIF
+	ENDLOOP;
+	defineLabel(doneLabel)
+	END parseIfStatement;
+
+{ CaseStatement	::= "CASE" Expression "OF" Case { Case } [ "ELSE" StatementSequence ] "ENDCASE"
+  Case		::= Range { ( "," | ";" ) Range } ":" StatementSequence "END"
+  Range		::= ConstantExpression [ ".." ConstantExpression ] }
+PROCEDURE parseCaseStatement(WORD exitLabelP, continueLabel);
+	WORD		forwardLabel, mark, endTable, elseCase, finallyLabel, rangeEnd, rangeStart;
+	STATIC WORD	firstLabel, lastLabel, tableSize;
+	BEGIN
+	getSymbol;
+	parseExpression(@temp, wordTypeSize);
+	IF	temp <> wordTypeSize
+	THEN	error71 { Numerical value expected }
+	ENDIF;
+	emit0AndFlush(jumpAbs);
+	forwardLabel := programCounter2;
+	verifyExpectedSymbol(ofSymbol + 256 * 81); { OF expected }
+	mark := heap;
+	endTable := heap;
+	elseCase := 0;
+	finallyLabel := 0;
+	LOOP	{ Termination: exits if ELSE, ENDCASE or not legal start of ConstantExpression }
+		IF	symbol = elseSymbol
+		THEN	getSymbol;
+			elseCase := programCounter;
+			heap := endTable;
+			parseStatementSequence(exitLabelP, continueLabel, false);
+			emitAndFlush(jumpAbs, finallyLabel);
+			finallyLabel := programCounter2;
+			EXIT
+		ENDIF;
+		IF	symbol = endcaseSymbol
+		THEN	EXIT
+		ENDIF;
+		IF	(symbol <> unsignedIntegerSymbol) AND (symbol <> addressOfSymbol) AND
+			(symbol << identifierSymbol) AND (symbol <> leftRoundParenthesesSymbol)
+		THEN	error(63); { Constant factor cannot start with this symbol }
+			EXIT
+		ENDIF;
+		LOOP	{ Termination: exit if ":" or non-comma detected }
+			parseConstantExpressionNoRelocatable(@rangeStart);
+			rangeEnd := rangeStart; { Default }
+			IF	symbol = rangeSymbol
+			THEN	getSymbol;
+				parseConstantExpressionNoRelocatable(@rangeEnd)
+			ENDIF;
+			WHILE rangeStart <<= rangeEnd DO
+				jp := mark;
+				ip := endTable;
+				WHILE	(jp << ip) AND (jp^:[2] << rangeStart) DO
+					jp := jp + 4
+				ENDWHILE;
+				IF	(jp << ip) AND (jp^:[2] = rangeStart)
+				THEN	error(82) { Duplicate case entry }
+				ELSE	kp := ip + 4;
+					endTable := kp;
+					WHILE ip >>= jp DO
+						kp^:[4] := ip^:[4];
+						kp := kp - 4;
+						ip := ip - 4
+					ENDWHILE
+				ENDIF;
+				jp^:[2] := rangeStart;
+				(jp + 2)^:[2] := programCounter;
+				rangeStart := rangeStart + 1
+			ENDWHILE;
+			heap := endTable;
+			IF	symbol = colonSymbol
+			THEN	getSymbol;
+				EXIT
+			ENDIF;
+			IF	symbol = commaSymbol
+			THEN	getSymbol
+			ELSE	error(23); { ":" expected }
+				EXIT
+			ENDIF
+		ENDLOOP;
+		parseStatementSequence(exitLabelP, continueLabel, false);
+		emitAndFlush(jumpAbs, finallyLabel);
+		finallyLabel := programCounter2;
+		verifyExpectedSymbol(endSymbol + 256 * 66) { END expected }
+	ENDLOOP;
+	IF	endTable = mark
+	THEN	error(62) { Constant expected }
+	ENDIF;
+	verifyExpectedSymbol(endcaseSymbol + 256 * 83); { ENDCASE expected }
+	firstLabel := mark^:[2];
+	temp := endTable - 4;
+	lastLabel := temp^:[2];
+	tableSize := lastLabel - firstLabel;
+	flushPeepHoleBuffer;
+	IF	elseCase = 0
+	THEN	elseCase := programCounter + caseSetupLength + tableSize * 2 - (firstLabel = 0)
+		{ Take care of optimization which might reduce length of set-up code by one }
+	ENDIF;
+	defineLabel(forwardLabel);
+	emit(loadElse, elseCase);
+	emit(lddeConst, -firstLabel);
+	emit(ldbcConst, tableSize);
+	emit0AndFlush(caseJump);
+	ip := mark;
+	jp := ip + 2;
+	kp := firstLabel;
+	WHILE kp <<= lastLabel DO
+		IF	kp = ip^:[2]
+		THEN	emitWordRelative(jp^:[2]);
+			jp := jp + 4;
+			ip := ip + 4
+		ELSIF	kp << ip^:[2]
+		THEN	emitWordRelative(elseCase)
+		ENDIF;
+		kp := kp + 1
+	ENDWHILE;
+	defineLabel(finallyLabel);
+	heap := mark
+	END parseCaseStatement;
+
+{ RepeatStatement ::= "REPEAT" StatementSequence "UNTIL" Expression }
+PROCEDURE parseRepeatStatement;
+	WORD	topLabel, bottomLabel;
+	BEGIN
+	getSymbol;
+	topLabel := programCounter;
+	invalidateAll;
+	bottomLabel := 0;
+	parseStatementSequence(@bottomLabel, topLabel, false);
+	verifyExpectedSymbol(untilSymbol + 256 * 13);	{ UNTIL expected		}
+	parseExpression(@temp, booleanTypeSize);
+	IF	temp <> booleanTypeSize
+	THEN	error10					{ Boolean expression expected	}
+	ENDIF;
+	emitAndFlush(jumpAbsFalseOpt, topLabel);
+	defineLabel(bottomLabel)
+	END parseRepeatStatement;
+
+{ LoopStatement ::= "LOOP" StatementSequence "ENDLOOP" }
+PROCEDURE parseLoopStatement;
+	WORD	topLabel, exitLabel;
+	BEGIN
+	getSymbol;
+	exitLabel := 0;
+	topLabel := programCounter;
+	invalidateAll;
+	parseStatementSequence(@exitLabel, topLabel, false);
+	emitAndFlush(jumpAbsOpt, topLabel);
+	verifyExpectedSymbol(endloopSymbol + 256 * 25); { ENDLOOP expected }
+	defineLabel(exitLabel)
+	END parseLoopStatement;
+
+{ ExitStatement ::= "EXIT" }
+PROCEDURE parseExitStatement(WORD exitLabelP);
+	BEGIN
+	getSymbol; { Note: EXIT is always possible in contrast to CONTINUE }
+	emitAndFlush(jumpAbs, exitLabelP^:[2]);
+	exitLabelP^:[2] := programCounter2
+	END parseExitStatement;
+
+{ ReturnStatement ::= "RETURN" Expression }
+PROCEDURE parseReturnStatement;
+	BEGIN
+	getSymbol;
+	parseExpression(@temp, wordTypeSize);
+	IF	temp <> wordTypeSize
+	THEN	error71				{ Numerical value expected		}
+	ENDIF;
+	IF	currentReturnLabelP = nil	{ Only possible if within a procedure	}
+	THEN	error(14)			{ RETURN outside of a procedure		}
+	ELSIF	symbol <> endSymbol		{ No need to jump if already at the end	}
+	THEN	emitAndFlush(jumpAbs, currentReturnLabelP^:[2]);
+		currentReturnLabelP^:[2] := programCounter2
+	ENDIF
+	END parseReturnStatement;
+
+{ ContinueStatement ::= "CONTINUE" }
+PROCEDURE parseContinueStatement(WORD continueLabel);
+	BEGIN
+	getSymbol;
+	IF	continueLabel = nil	{ Only possible if within a loop	}
+	THEN	error(08)		{ Cannot CONTINUE			}
+	ELSE	emitAndFlush(jumpAbsOpt, continueLabel)
+	ENDIF
+	END parseContinueStatement;
+
+{ Statement ::= [ LabelIdentifier ":" ] [ Assignment | ProcedureCall | WhileStatement | GotoStatement |
+  IfStatement | CaseStatement | RepeatStatement | LoopStatement | ExitStatement | ContinueStatement |
+  ReturnStatement ] }
+{ Returns true iff statement was a procedure call and following RET statement may be skipped }
+PROCEDURE parseStatement(WORD exitLabelP, continueLabel, endsWithReturn);
+	BYTE	result;
+	BEGIN
+	checkHeap;
+	result := false;					{ Default return value is false			}
+	IF	symbol = labelIdentifierSymbol
+	THEN	IF	symbolEntrySize = false			{ Label not yet defined				}
+		THEN	defineLabel(symbolEntryValue);
+			(symbolEntryP + valueOffset	)^:[2] := programCounter;
+			(symbolEntryP + sizeOffset	)^:[2] := true
+		ELSE	error41					{ Identifier already defined			}
+		ENDIF;
+		getSymbol;
+		verifyExpectedSymbol(colonSymbol + 256 * 23);	{ ":" expected					}
+		invalidateAll
+	ENDIF;
+	IF	(localVariableIdentifierSymbol <<= symbol) AND (symbol <<= staticParameterIdentifierSymbol) OR
+		(symbol = leftRoundParenthesesSymbol)
+	THEN	parseAssignmentOrVariableProcedureCall
+	ELSIF	(procedureIdentifierSymbol <<= symbol) AND (symbol <<= externalProcedureIdentifierSymbol)
+	THEN	result := parseProcedureCall(endsWithReturn:[1])
+	ELSIF	symbol >>= identifierSymbol
+	THEN	error(34);					{ Identifier must be variable or procedure	}
+		parseAssignmentOrVariableProcedureCall
+	ELSE	CASE symbol OF
+		whileSymbol:	parseWhileStatement				END
+		gotoSymbol:	parseGotoStatement				END
+		ifSymbol:	parseIfStatement(exitLabelP, continueLabel)	END
+		caseSymbol:	parseCaseStatement(exitLabelP, continueLabel)	END
+		repeatSymbol:	parseRepeatStatement				END
+		loopSymbol:	parseLoopStatement				END
+		exitSymbol:	parseExitStatement(exitLabelP)			END
+		returnSymbol:	parseReturnStatement				END
+		continueSymbol:	parseContinueStatement(continueLabel)		END
+		ENDCASE
+	ENDIF;
+	RETURN result
+	END parseStatement;
+
+{ StatementSequence ::= Statement { ( ";" | "," ) Statement } }
+{ Returns true iff last statement was a procedure call and following RET statement may be skipped }
+PROCEDURE parseStatementSequence(WORD exitLabelP, continueLabel, endsWithReturn);
+	BYTE	result;
+	BEGIN
+	result := parseStatement(exitLabelP, continueLabel, endsWithReturn:[1]);
+	LOOP	{ Termination: exit if no legal start of statement or "," or ";" detected }
+		IF	(symbol = semicolonSymbol) OR (symbol = commaSymbol)
+		THEN	getSymbol;
+			result := parseStatement(exitLabelP, continueLabel, endsWithReturn:[1])
+		ELSIF	(symbol >>= identifierSymbol) OR (symbol = leftRoundParenthesesSymbol) OR
+			(whileSymbol <<= symbol) AND (symbol <<= continueSymbol)
+		THEN	error(56); { ";" expected }
+			result := parseStatement(exitLabelP, continueLabel, endsWithReturn:[1])
+		ELSE	EXIT
+		ENDIF
+	ENDLOOP;
+	RETURN result
+	END parseStatementSequence;
+
+{ LabelDeclaration ::= "LABEL" SingleLabel { SingleLabel }
+  SingleLabel ::= Identifier ("," | ";") }
+PROCEDURE parseLabelDeclaration;
+	BEGIN
+	WHILE symbol >>= identifierSymbol DO
+		IF	(symbol >> identifierSymbol) AND (symbolEntryP >>= currentScope)
+		THEN	IF	symbol = exportedEntryIdentifierSymbol
+			THEN	error94 { Cannot export this kind of identifier }
+			ELSE	error41 { Identifier already declared at this level }
+			ENDIF
+		ELSE	enterSymbol(labelIdentifierSymbol)
+		ENDIF;
+		getSymbol;
+		verifyCommaOrSemicolon
+	ENDWHILE
+	END parseLabelDeclaration;
+
+{ ConstDeclarationt	::= "CONST" SingleConstant { SingleConstant }
+  SingleConstant	::= Identifier [ "=" ConstantExpression ] ("," | ";") }
+PROCEDURE parseConstDeclaration;
+	STATIC	WORD	entryP, previousValue;
+	BEGIN
+	previousValue := 0;
+	WHILE symbol >>= identifierSymbol DO
+		IF	(symbol >> identifierSymbol) AND (symbolEntryP >>= currentScope)
+		THEN	IF	symbol = exportedEntryIdentifierSymbol
+			THEN	error94 { Cannot export this kind of identifier		}
+			ELSE	error41 { Identifier already declared at this level	}
+			ENDIF
+		ENDIF;
+		enterSymbol(constantIdentifierSymbol);
+		entryP := symbolEntryP;
+		getSymbol;
+		IF	symbol = equalSymbol
+		THEN	getSymbol;
+			ip := entryP + sizeOffset;
+			ip^:[1] := true; { Constant is undefined }
+			parseConstantExpression(@previousValue, ip + 1);
+			(entryP + sizeOffset)^:[1] := false { Constant is now defined }
+		ELSE	(entryP + sizeOffset)^:[2] := 256 * false + false; { Not relocatable and not being defined }
+			previousValue := previousValue + 1
+		ENDIF;
+		(entryP + valueOffset)^:[2] := previousValue;
+		verifyCommaOrSemicolon
+	ENDWHILE
+	END parseConstDeclaration;
+
+{ Typ ::= ( [ "STATIC" ] "WORD" | "BYTE" ) [ "[" ConstantExpression "]" ]
+	postcondition: currentTypeSize contains size of type		}
+PROCEDURE parseTyp(WORD isStaticP);
+	BEGIN
+	isStaticP^:[1] := false;			{ Default				}
+	IF	symbol = staticSymbol
+	THEN	getSymbol;
+		isStaticP^:[1] := true
+	ENDIF;
+	currentTypeSymbol := symbol;
+	IF	(symbol = byteSymbol) OR (symbol = wordSymbol)
+	THEN	getSymbol
+	ELSE	error(44)				{ BYTE or WORD expected			}
+	ENDIF;
+	currentTypeSize := byteTypeSize;		{ Default				}
+	IF	symbol = leftSquareParenthesesSymbol
+	THEN	getSymbol;
+		parseExplicitSize(@currentTypeSize, byteTypeSize)
+	ENDIF;
+	IF	currentTypeSymbol = wordSymbol
+	THEN	currentTypeSize := 2 * currentTypeSize
+	ENDIF
+	END parseTyp;
+
+{ Value ::= ( String | ConstantExpression ) [ ":" "[" ConstantExpression "]" ]
+  postcondition: currentInitializationLength is set to the number of initialized bytes }
+PROCEDURE parseValue;
+	BYTE	isRelocatable;
+	STATIC WORD symbolLengthSave;
+	BEGIN
+	IF	symbol = stringSymbol
+	THEN	symbolLengthSave := symbolLength;
+		ip := symbolStartP;
+		WHILE ip^:[1] <> 0 DO
+			emitByte(ip^:[1]);
+			ip := ip + 1
+		ENDWHILE;
+		getSymbol;
+		parseSizeExpression(@currentInitializationLength, symbolLengthSave);
+		IF	currentInitializationLength >> symbolLengthSave
+		THEN	{ More space required, fill with zero }
+			emitEmptySpace(currentInitializationLength - symbolLengthSave)
+		ELSIF	currentInitializationLength << symbolLengthSave
+		THEN	{ Less space required, truncate by moving program counter back }
+			programCounter := programCounter + currentInitializationLength - symbolLengthSave;
+			appendProgramCounterRelFile
+		ENDIF
+	ELSE	parseConstantExpression(@currentConstantExpression, @isRelocatable);
+		parseSizeExpression(@currentInitializationLength, wordTypeSize);
+		IF	(currentInitializationLength = wordTypeSize) AND isRelocatable
+		THEN	emitWordRelativeAlways(currentConstantExpression)
+		ELSE	emitByte(currentConstantExpression);		{ emitByte only uses lower byte }
+			IF	currentInitializationLength >> 1
+			THEN	emitByte(currentConstantExpression[1]);	{ emitByte only uses lower byte }
+				IF	currentInitializationLength >> 2
+				THEN	emitEmptySpace(currentInitializationLength - 2)
+				ENDIF
+			ENDIF
+		ENDIF
+	ENDIF
+	END parseValue;
+
+{ VariableDeclaration	::= Typ SingleVariable { SingleVariable }
+  SingleVariable	::= Identifier
+			[ "EXTERNAL" | "AT" ConstantExpression | "=" ( Value | "(" Value { "," Value } ")" ) ]
+			( "," | ";" )
+}
+PROCEDURE parseVariableDeclaration(WORD totalParameterSizeP, localVariableChainP);
+	WORD	entrySymbolP, currentSize;
+	BYTE	isRelocatable, isStatic;
+	STATIC WORD overallInitializationLength; { Total length of an initializer }
+	BEGIN
+	parseTyp(@isStatic);
+	IF	currentScope = globalScope
+	THEN	isStatic := true
+	ENDIF;
+	currentSize := currentTypeSize;
+	WHILE symbol >>= identifierSymbol DO
+		entrySymbolP := nil;
+		IF	(identifierSymbol << symbol) AND (symbol << exportedEntryIdentifierSymbol) AND
+			(symbolEntryP >>= currentScope)
+		THEN	error41 { Identifier already declared at this level }
+		ENDIF;
+		IF	(symbol = exportedEntryIdentifierSymbol) AND (currentScope = globalScope)
+		THEN	entrySymbolP := symbolEntryP
+		ENDIF;
+		enterSymbol(localVariableIdentifierSymbol + 2 * isStatic);
+		currentVariableP := symbolEntryP;
+		getSymbol;
+		currentTypeSize := currentSize;
+		IF	symbol = externalSymbol
+		THEN	currentVariableP^:[1] := globalExternalVariableIdentifierSymbol;
+			(currentVariableP + sizeOffset)^:[2] := currentTypeSize;
+			getSymbol
+		ELSIF	symbol = atSymbol
+		THEN	getSymbol;
+			parseConstantExpression(currentVariableP + valueOffset, @isRelocatable);
+			currentVariableP^:[1] := globalAbsoluteVariableIdentifierSymbol + isRelocatable;
+			(currentVariableP + sizeOffset)^:[2] := currentTypeSize
+		ELSE	IF	isStatic <> false
+			THEN	(currentVariableP + valueOffset)^:[2] := programCounter;
+				IF	entrySymbolP <> nil
+				THEN	appendEntryPointRelFile(entrySymbolP);
+					(entrySymbolP + valueOffset)^:[2] := true
+				ENDIF
+			ELSE	(currentVariableP + valueOffset)^:[2] := localVariableChainP^:[2];
+				localVariableChainP^:[2] := currentVariableP
+			ENDIF;
+			overallInitializationLength := 0;
+			IF	symbol = equalSymbol
+			THEN	IF	isStatic = false
+				THEN	error(49) { Cannot initialize local variable }
+				ENDIF;
+				getSymbol;
+				IF	symbol = leftRoundParenthesesSymbol
+				THEN	getSymbol;
+					overallInitializationLength := 0;
+					LOOP	{ Termination: exit if non-comma detected }
+						parseValue;
+						overallInitializationLength :=
+							overallInitializationLength + currentInitializationLength;
+						IF	symbol <> commaSymbol
+						THEN	EXIT
+						ENDIF;
+						getSymbol
+					ENDLOOP;
+					verifyRightRoundParenthesesSymbol { ")" expected }
+				ELSE	parseValue;
+					overallInitializationLength := currentInitializationLength
+				ENDIF
+			ELSIF	isStatic <> false
+			THEN	emitEmptySpace(currentTypeSize);
+				overallInitializationLength := currentTypeSize
+			ELSE	totalParameterSizeP^:[2] := totalParameterSizeP^:[2] + currentTypeSize
+			ENDIF;
+			IF	overallInitializationLength >> currentTypeSize
+			THEN	currentTypeSize := overallInitializationLength
+			ELSIF	(currentTypeSize >> overallInitializationLength) AND isStatic
+			THEN	emitEmptySpace(currentTypeSize - overallInitializationLength)
+			ENDIF;	{ Postcondition: programCounter resp. totalParameterSizeP has been incremented by
+				  currentTypeSize }
+			(currentVariableP + sizeOffset)^:[2] := currentTypeSize
+		ENDIF;
+		verifyCommaOrSemicolon
+	ENDWHILE
+	END parseVariableDeclaration;
+
+{ ProcedureDeclaration	::= "PROCEDURE" Identifier [ ParameterList ] ";" ( Block | "FORWARD" | "EXTERNAL" ) ";"
+  ParameterList		::= "(" Parameter { ";" Parameter } ")"
+  Parameter		::= Typ Identifier { "," Identifier } }
+PROCEDURE parseProcedureDeclaration;
+
+	PROCEDURE rebaseStatics(WORD entryP);
+		BEGIN
+		ip := symbolTableP;
+		jp := 0;
+		WHILE ip <> entryP DO
+			IF	ip^:[1] = staticParameterIdentifierSymbol
+			THEN	jp := jp + (ip + sizeOffset)^:[2]
+			ENDIF;
+			ip := (ip + nextEntryOffset)^:[2]
+		ENDWHILE;
+		jp := -jp;
+		programCounter := programCounter + jp;
+		appendProgramCounterRelFile;
+		ip := symbolTableP;
+		WHILE ip <> entryP DO
+			IF	ip^:[1] = staticParameterIdentifierSymbol
+			THEN	(ip + valueOffset)^:[2] := jp;
+				jp := jp + (ip + sizeOffset)^:[2]
+			ENDIF;
+			ip := (ip + nextEntryOffset)^:[2]
+		ENDWHILE
+		END rebaseStatics;
+
+	WORD	entryP, forwardEntryP, oldSelfP, currentSize, totalParameterSize,
+		newScope, oldSymbolTableP, entrySymbolP, localVariableChainP;
+	BYTE	doForward, isStatic;
+	LABEL	afterParameterList;
+	BEGIN
+	doForward := false;
+	localVariableChainP := nil;
+	IF	symbol >>= identifierSymbol
+	THEN	newScope := heap;
+		entrySymbolP := nil;
+		IF	(symbol = forwardProcedureIdentifierSymbol) OR
+			(symbol = exportedForwardProcedureIdentifierSymbol)
+		THEN	forwardEntryP := nil;
+			doForward := true;
+			symbolEntryP^:[1] := procedureIdentifierSymbol; { Not forward any more }
+			oldSelfP := symbolEntryP;
+			forwardEntryP := (symbolEntryP + sizeOffset)^:[2]; { First parameter of forward declaration }
+			enterSymbol(procedureNoStartYetIdentifierSymbol);
+			(symbolEntryP + valueOffset)^:[2] := (oldSelfP + valueOffset)^:[2];
+			entryP := symbolEntryP;
+			IF	symbol = exportedForwardProcedureIdentifierSymbol
+			THEN	entrySymbolP := symbolEntryP
+			ENDIF
+		ELSE	IF	(identifierSymbol << symbol) AND (symbol << exportedEntryIdentifierSymbol) AND
+				(symbolEntryP >>= currentScope)
+			THEN	error41 { Identifier already declared at this level }
+			ENDIF;
+			IF	(symbol = exportedEntryIdentifierSymbol) AND (currentScope = globalScope)
+			THEN	entrySymbolP := symbolEntryP;
+				(symbolEntryP + valueOffset)^:[2] := true
+			ENDIF;
+			enterSymbol(procedureNoStartYetIdentifierSymbol);
+			entryP := symbolEntryP
+		ENDIF;
+		oldSymbolTableP := symbolTableP;
+		getSymbol;
+		totalParameterSize := 0;
+		IF	symbol = leftRoundParenthesesSymbol
+		THEN	getSymbol;
+			LOOP	{ Termination: exit if ")" or non legal start of type detected }
+				parseTyp(@isStatic);
+				currentSize := currentTypeSize;
+				WHILE symbol >>= identifierSymbol DO
+					IF	(symbol >> identifierSymbol) AND (symbolEntryP >>= newScope)
+					THEN	error41 { Identifier already declared at this level }
+					ENDIF;
+					IF	isStatic <> false
+					THEN	enterSymbol(staticParameterIdentifierSymbol);
+						(symbolEntryP + valueOffset)^:[2] := programCounter;
+						emitEmptySpace(currentSize)
+					ELSE	enterSymbol(parameterIdentifierSymbol);
+						(symbolEntryP + valueOffset)^:[2] := localVariableChainP;
+						localVariableChainP := symbolEntryP;
+						totalParameterSize := totalParameterSize + currentSize
+					ENDIF;
+					(symbolEntryP + sizeOffset)^:[2] := currentSize;
+					IF	((forwardEntryP = nil) OR
+						 ((forwardEntryP + sizeOffset)^:[2] <> currentSize) OR
+						 (forwardEntryP^:[1] <> symbolEntryP^:[1])) AND doForward
+					THEN	error(86) { Parameter list does not match previous }
+					ELSIF	forwardEntryP <> nil
+					THEN	forwardEntryP := (forwardEntryP + nextEntryOffset)^:[2];
+						IF	forwardEntryP = oldSelfP
+						THEN	forwardEntryP := nil
+						ENDIF
+					ENDIF;
+					getSymbol;
+					IF	symbol = commaSymbol
+					THEN	getSymbol
+					ENDIF
+				ENDWHILE;
+				IF	symbol = rightRoundParenthesesSymbol
+				THEN	getSymbol;
+					EXIT
+				ENDIF;
+				verifySemicolonSymbol;		{ ";" expected					}
+				IF	(symbol << byteSymbol) OR (symbol >> staticSymbol)
+				THEN	error(44);		{ BYTE or WORD expected				}
+					GOTO afterParameterList
+				ENDIF
+			ENDLOOP;
+			IF	(forwardEntryP <> nil) AND doForward
+			THEN	error(86)			{ Parameter list does not match previous	}
+			ENDIF;
+			{ Now reverse the list of formal parameters, if there is more than one:
+			example: f(x, y, z)
+			before: symbolEntryP -> z -> y -> x -> f
+			after: symbolEntryP -> x -> y -> z -> f and f.value -> x }
+			ip := symbolTableP;			{ First						}
+			temp := symbolTableP + nextEntryOffset;
+			jp := temp^:[2];			{ Second					}
+			IF	(jp <> entryP) AND (totalErrors = 0)
+								{ More than one parameter, reverse is necessary }
+			THEN	temp^:[2] := entryP;		{ "z".next = "f"				}
+				REPEAT
+					kp := jp + nextEntryOffset;
+					temp := kp;
+					kp := kp^:[2];		{ Third						}
+					temp^:[2] := ip;	{ Second.next = first				}
+					ip := jp;		{ First = second				}
+					jp := kp		{ Second = third				}
+				UNTIL jp = entryP;
+				symbolTableP := ip		{ symbolTableP = "x"				}
+			ENDIF;
+			(entryP + sizeOffset)^:[2] := symbolTableP
+		ENDIF;
+afterParameterList:
+		verifySemicolonSymbol;				{ ";" expected					}
+		IF	symbol = externalSymbol
+		THEN	entryP^:[1] := externalProcedureIdentifierSymbol;
+			IF	entrySymbolP <> nil
+			THEN	error94				{ Cannot export this kind of identifier		}
+			ENDIF;
+			rebaseStatics(entryP);
+			getSymbol
+		ELSIF	symbol = forwardSymbol
+		THEN	entryP^:[1] := forwardProcedureIdentifierSymbol + (entrySymbolP <> nil);
+			rebaseStatics(entryP);
+			getSymbol
+		ELSE	temp := currentScope;
+			currentScope := newScope;
+			newScope := temp;
+			parseBlock(entryP, entrySymbolP, totalParameterSize, @localVariableChainP);
+			currentScope := newScope
+		ENDIF;
+		verifySemicolonSymbol;				{ ";" expected					}
+		symbolTableP := oldSymbolTableP
+	ELSE	error31;					{ Identifier expected				}
+		WHILE	(symbol <> semicolonSymbol) AND (symbol <> eofSymbol) DO
+			getSymbol
+		ENDWHILE;
+		getSymbol
+	ENDIF
+	END parseProcedureDeclaration;
+
+{ Declarations ::= { LabelDeclaration | ConstDeclaration | VariableDeclaration | ProcedureDeclaration } }
+PROCEDURE parseDeclarations(WORD totalLocalVariableSizeP, localVariableChainP);
+	STATIC WORD errorMessageShowm;
+
+	PROCEDURE showErrorMessage;
+		BEGIN
+		error(95); { Total size of local variables and parameters too large }
+		errorMessageShowm := true
+		END showErrorMessage;
+
+	BEGIN { parseDeclarations }
+	checkHeap;
+	totalLocalVariableSizeP^:[2] := 0;
+	LOOP	{ Termination: exit if symbol detected that cannot start a declaration }
+		CASE symbol OF
+		labelSymbol:
+			getSymbol;
+			parseLabelDeclaration							END
+		constSymbol:
+			getSymbol;
+			parseConstDeclaration							END
+		byteSymbol, wordSymbol, staticSymbol:
+			parseVariableDeclaration(totalLocalVariableSizeP, localVariableChainP)	END
+		procedureSymbol:
+			getSymbol;
+			parseProcedureDeclaration						END
+		ELSE	EXIT
+		ENDCASE
+	ENDLOOP;
+	IF	currentScope <> globalScope
+	THEN	ip := localVariableChainP^:[2];
+		jp := 0;
+		errorMessageShowm := false;
+		WHILE ip <> nil DO
+			temp := ip + valueOffset;
+			kp := ip + sizeOffset;
+			IF	ip^:[1] = localVariableIdentifierSymbol
+			THEN	ip := temp^:[2];
+				temp^:[2] := jp;
+				IF	(jp >>= maxAllowedOffset) AND (errorMessageShowm = false)
+				THEN	showErrorMessage
+				ENDIF;
+				jp := jp + kp^:[2]
+			ELSIF	ip^:[1] = parameterIdentifierSymbol
+			THEN	ip := temp^:[2];
+				temp^:[2] := jp + 4; { Reserve 4 bytes extra for return address and old IX frame pointer }
+				IF	(temp^:[2] >>= maxAllowedOffset) AND (errorMessageShowm = false)
+				THEN	showErrorMessage
+				ENDIF;
+				jp := jp + kp^:[2]
+{ Debug only		ELSE	error(92); { Compiler error }
+				HALT
+}			ENDIF
+		ENDWHILE
+	ENDIF
+	END parseDeclarations;
+
+PROCEDURE checkBlock(WORD endOfScope);
+	BEGIN
+	ip := symbolTableP;
+	LOOP	{ Termination: exit when end-of-scope or list of key-words reached }
+		IF	ip = lastEntryP
+		THEN	EXIT					{ No need to check the key-words		}
+		ENDIF;
+		jp := ip + valueOffset;
+		IF	ip^:[1] = labelIdentifierSymbol
+		THEN	IF	(jp^:[2] <> 0) AND ((ip + sizeOffset)^:[2] = false)
+			THEN	error(58)			{ Block contains undefined but used label	}
+			ENDIF
+		ELSIF	((ip^:[1] = externalProcedureIdentifierSymbol) OR
+			 (ip^:[1] = globalExternalVariableIdentifierSymbol)) AND (jp^:[2] <> nil)
+		THEN	appendBitsRelFile9(100_0110_01B);	{ Chain external program counter relative	}
+			appendWordRelFile(jp^:[2]);		{ Head of chain					}
+			appendNameRelFile(ip + symbolStringOffset)
+		ELSIF	(ip^:[1] = forwardProcedureIdentifierSymbol) OR
+			(ip^:[1] = exportedForwardProcedureIdentifierSymbol)
+		THEN	error(87)				{ Procedure declared forward but not defined	}
+		ELSIF	(ip^:[1] = exportedEntryIdentifierSymbol) AND (jp^:[2] = false)
+		THEN	error(84)				{ Symbol exported but not declared		}
+		ENDIF;
+		IF	ip = endOfScope
+		THEN	EXIT
+		ENDIF;
+		ip := (ip + nextEntryOffset)^:[2]
+	ENDLOOP
+	END checkBlock;
+
+{ Block ::= Declarations "BEGIN" StatementSequence "END" Identifier }
+PROCEDURE parseBlock(WORD name, entrySymbolP, totalParameterSize, localVariableChainP);
+	BYTE	returnRemoved;
+	WORD	endLabel, blockScope, mark, saveCurrentReturnLabelP, totalLocalVariableSize;
+	BEGIN
+	blockScope := symbolTableP;
+	mark := heap;
+	endLabel := 0;
+	parseDeclarations(@totalLocalVariableSize, localVariableChainP);
+	IF	name <> nil
+	THEN	ip := name + valueOffset;
+		defineLabel(ip^:[2]);
+		ip^:[2] := programCounter;
+		appendEntryPointRelFile(entrySymbolP);
+		name^:[1] := procedureIdentifierSymbol	{ Now we have the start address }
+	ENDIF;
+	IF	symbol = beginSymbol
+	THEN	getSymbol
+	ELSE	error(65) { BEGIN, LABEL, CONST, STATIC, BYTE, WORD, PROCEDURE expected }
+	ENDIF;
+{{psco}dumpSymbolTable;}
+	IF	currentScope = globalScope
+	THEN	emitCALLExternal(@staChainHeader);	{ CALL .STA }
+		parseStatementSequence(@endLabel, nil, false);
+		defineLabel(endLabel)
+	ELSE	IF	totalLocalVariableSize + totalParameterSize <> 0
+		THEN	IF	totalLocalVariableSize = 0
+			THEN	emit0AndFlush(entryParNVar0)
+			ELSE	emitAndFlush(entryParNVarM, -totalLocalVariableSize)
+			ENDIF
+		ENDIF;
+		saveCurrentReturnLabelP := currentReturnLabelP;
+		currentReturnLabelP := @endLabel;
+		returnRemoved := parseStatementSequence(currentReturnLabelP, nil,
+			totalParameterSize + totalLocalVariableSize = 0);
+		defineLabel(endLabel);
+		currentReturnLabelP := saveCurrentReturnLabelP;
+		IF	totalParameterSize <> 0
+		THEN	IF	totalLocalVariableSize <> 0
+			THEN	IF	totalParameterSize[1]:[1] = 0
+				THEN	emitAndFlush(returnParNVarM, totalLocalVariableSize:[1] +
+						256 * totalParameterSize:[1])
+				ELSE	emit(ldbConst, totalLocalVariableSize:[1]);
+					emitAndFlush(returnParXVarM, totalParameterSize)
+				ENDIF
+			ELSIF	totalParameterSize = 2
+			THEN	emit0AndFlush(returnPar2Var0)
+			ELSIF	totalParameterSize = 4
+			THEN	emit0AndFlush(returnPar4Var0)
+			ELSE	emitAndFlush(returnParNVar0, totalParameterSize)
+			ENDIF
+		ELSE	IF	totalLocalVariableSize <> 0
+			THEN	emitAndFlush(returnPar0VarM, totalLocalVariableSize)
+			ELSIF	(returnRemoved = false) OR (endLabel <> 0)
+			THEN	emit0AndFlush(returnPar0Var0)
+			{ Else skip RET statement. Conditions to be met are:
+			  1. Previous statement was a procedure call where the call has been replaced by
+			     a jump instruction.
+			  2. The RET statement is not a target of jump instruction (e.g. from an EXIT or
+			     RETURN statement)
+			}
+			ENDIF
+		ENDIF
+	ENDIF;
+	IF	symbol = endSymbol
+	THEN	getSymbol;
+		IF	symbol >>= identifierSymbol
+		THEN	IF	name <> symbolEntryP
+			THEN	error(67)	{ Identifier is not name of this block
+						In case name = nil this message is only
+						produced if symbolEntryP <> nil which
+						is correct!				}
+			ENDIF;
+			getSymbol
+		ELSE	error31			{ Identifier expected			}
+		ENDIF
+	ELSE	error(66)			{ END expected				}
+	ENDIF;
+	checkBlock(blockScope);
+	heap := mark;
+	symbolTableP := blockScope
+	END parseBlock;
+
+{ Program ::= "PROGRAM" Identifier ";" [ ExportDeclaration ] Block "." }
+{ Module ::= "MODULE" Identifier ";" [ ExportDeclaration ] Declarations }
+PROCEDURE parseProgramOrModule(WORD isProgram);
+	WORD	name, localVariableChainP;
+	BEGIN
+	IF	symbol = identifierSymbol
+	THEN	appendBitsRelFile(100_0010B, 7);		{ Program name			}
+		appendNameRelFile(symbolStartP);
+		appendBitsRelFile9(100_1010_00B);		{ Define data size absolute	}
+		appendWordRelFile(0);				{ 0				}
+		enterSymbol(programOrModuleIdentifier);
+		name := symbolEntryP
+	ELSE	error31;					{ Identifier expected		}
+		name := nil
+	ENDIF;
+	getSymbol;
+	verifySemicolonSymbol;					{ ";" expected			}
+	IF	symbol = exportSymbol
+	THEN	getSymbol;
+		parseExportDeclaration
+	ENDIF;
+	currentScope := globalScope;
+	IF	isProgram:[1] <> false
+	THEN	localVariableChainP := nil;
+		parseBlock(name, nil, 0, @localVariableChainP);
+		emitJPConstExternal(@finChainHeader);		{ JP .FIN	; boot		}
+		linkExternals;
+		appendBitsRelFile(100_0011_111B, 10);		{ Request library search	}
+		appendWordRelFile('SP');
+		appendWordRelFile('LR');
+		appendWordRelFile('TL');
+		appendBitsRelFile('B', 8);
+		appendBitsRelFile9(100_1110_01B);		{ End program relative		}
+		appendWordRelFile(staChainHeader - 1)
+	ELSE	parseDeclarations(@temp, @localVariableChainP);
+		checkBlock(name);
+		linkExternals;
+		IF	compilationUnitContainsCode = false
+		THEN	appendBitsRelFile9(100_1101_01B);	{ Program size program relative	}
+			appendWordRelFile(programCounter)
+		ENDIF;
+		appendBitsRelFile9(100_1110_00B);		{ End program absolute		}
+		appendWordRelFile(0)
+	ENDIF;
+	WHILE relFileBitPosition <> 0 DO			{ Force to byte boundary	}
+		appendZeroBit
+	ENDWHILE;
+	appendBitsRelFile(100_1111B, 7);			{ End file			}
+	IF	symbol = periodSymbol
+	THEN	getSymbol;
+		IF	symbol <> eofSymbol
+		THEN	error(88)				{ End of file expected		}
+		ENDIF
+	ELSE	error(69)					{ "." expected			}
+	ENDIF
+	END parseProgramOrModule;
+
+{ CompilationUnit ::= Program | Module }
+PROCEDURE parseCompilationUnit;
+	BEGIN
+	IF	symbol = programSymbol
+	THEN	getSymbol;
+		parseProgramOrModule(true)
+	ELSIF	symbol = moduleSymbol
+	THEN	getSymbol;
+		parseProgramOrModule(false)
+	ELSE	error(68) { PROGRAM or MODULE expected }
+	ENDIF
+	END parseCompilationUnit;
+
+
+BEGIN { SPLCompiler }
+
+{ Clear all variables, including chain headers }
+relFileFCB:[@ip + 2 - @relFileFCB] := 0;
+{$ISTABEGIN.INC}
+clearExecTable;
+{$ISTAEND.INC}
+
+heap := LAST;
+globalScope := heap;
+symbolTableP := lastEntryP;
+
+printString(@signon);
+IF	commandLine[0]:[1] = 0
+THEN	printString(@usage);
+	EXIT
+ENDIF;
+
+freeMemory := 0ffffh;
+lineNumber := 1;
+checkHeap;
+
+splFileFCB:[FCBLength] := defaultFCB:[FCBLength];
+relFileFCB:[FCBLength] := defaultFCB:[FCBLength];
+relFileFCB[typeOffset]:[2] := 'RE';
+relFileFCB[typeOffset + 2]:[2] := 'L'; { Also sets ex to zero }
+IF	(splFileFCB[typeOffset]:[2] <> 'SP') AND (splFileFCB[typeOffset]:[2] <> '  ')
+THEN	IF	('A' <<= splFileFCB[typeOffset]:[1]) AND (splFileFCB[typeOffset]:[1] <<= 'P')
+	THEN	splFileFCB[driveOffset]:[1] := splFileFCB[typeOffset]:[1] + (1 - 'A')
+	ENDIF;
+	IF	('A' <<= splFileFCB[typeOffset + 1]:[1]) AND (splFileFCB[typeOffset + 1]:[1] <<= 'P')
+	THEN	relFileFCB[driveOffset]:[1] := splFileFCB[typeOffset + 1]:[1] + (1 - 'A')
+	ENDIF
+ENDIF;
+splFileFCB[typeOffset]:[2]	:= 'SP';
+splFileFCB[typeOffset + 2]:[2]	:= 'L';
+
+IF	BDOS(openFileCmd, @splFileFCB) = notFoundError
+THEN	printString(@fileNotFound);
+	EXIT
+ENDIF;
+splFileFCB[crPos]:[1] := 0;
+
+{{psco} dumpFCB(@relFileFCB);}
+BDOS(deleteFileCmd, @relFileFCB);	{ Delete previous .REL file if present, ignore error code	}
+IF	BDOS(makeFileCmd, @relFileFCB) = noDirectorySpaceError
+THEN	printString(@fileSystemFull);
+	EXIT
+ENDIF;
+
+IF	BDOS(openFileCmd, @errorFileFCB) = notFoundError	{ Try on A: first			}
+THEN	errorFileFCB[driveOffset]:[1] := 0;	{ If not found try default disk				}
+	IF	BDOS(openFileCmd, @errorFileFCB) = notFoundError
+	THEN	useNumericErrorMessages := true	{ Was set to false by general clear routine at start	}
+	ENDIF
+ENDIF;
+
+optimizedMultiplication := 10;
+pos := recordSize + 1;
+lineBufferP := @lineBuffer;
+getCharacter;
+getSymbol;
+parseCompilationUnit;
+
+REPEAT
+	appendZeroBit				{ At least one bit needs to be appended as last item
+						  was 7 bit starting on a byte boundary.		}
+UNTIL relFileBytePosition + relFileBitPosition = 0;
+{ Shorthand for "UNTIL (relFileBytePosition = 0) AND (relFileBitPosition = 0)"				}
+
+IF	BDOS(closeFileCmd, @relFileFCB) >> leastOKCode
+THEN	printString(@unexpectedError)
+ENDIF;
+
+IF	totalErrors = 0
+THEN	printString(@noErrorsDetectedString)
+ELSE	STPSUB;					{ Kill .SUB file					}
+	printString(@errorsDetectedString);
+	printInt(totalErrors)
+ENDIF;
+printString(@generatedCodeString);
+printInt(programCounter);
+printString(@freeMemoryString);
+printInt(freeMemory);
+printString(@dotCRLFString)
+{$ISTABEGIN.INC}
+;showExecTable
+{$ISTAEND.INC}
+
+END SPLCompiler.
+

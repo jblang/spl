@@ -1,0 +1,13 @@
+	.Z80
+
+	ENTRY	.INE
+	EXTRN	.IEQ
+
+; set carry flag if <HL> equal <DE>
+; <DE> and <HL> are unchanged
+.INE:	CALL	.IEQ
+	CCF
+	RET
+
+	END
+

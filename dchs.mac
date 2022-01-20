@@ -1,0 +1,17 @@
+	.Z80
+
+	ENTRY	.DCH
+
+; <DE> := - <DE> (16-bit signed number)
+.DCH:	LD	A,D
+	CPL
+	LD	D,A	; <D> := not <D>
+	LD	A,E
+	CPL
+	LD	E,A	; <E> := not <E>
+	INC	DE	; make two complement
+	XOR	A	; SPL expects cleared <A>
+	RET
+
+	END
+

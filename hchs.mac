@@ -1,0 +1,17 @@
+	.Z80
+
+	ENTRY	.HCH
+
+; <HL> := - <HL> (16-bit signed number)
+.HCH:	LD	A,H
+	CPL
+	LD	H,A	; <H> := not <H>
+	LD	A,L
+	CPL
+	LD	L,A	; <L> := not <L>
+	INC	HL	; make two complement
+	XOR	A	; SPL expects cleared <A>
+	RET
+
+	END
+

@@ -1,0 +1,12 @@
+	.Z80
+
+	ENTRY	LAST
+	EXTRN	.LAST
+	
+;	PROCEDURE LAST;
+;	return in <HL> the lowest unused address
+LAST:	LD	HL,.LAST
+	RET
+
+	END
+

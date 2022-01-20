@@ -1,0 +1,233 @@
+PROGRAM BootGen;
+
+{	Version history
+	- 15-Oct-2006, P. Schorn, program terminates now by rebooting
+	- 06-Aug-2004, P. Schorn, more optimizations
+	- 31-Jul-2004, P. Schorn, some optimizations
+	- 30-Jun-2004, P. Schorn, updated standard procedures
+	- 30-Mar-2002, P. Schorn, cleaned up data types
+	- 24-Mar-2002, P. Schorn, added force Z80 CPU
+}
+
+PROCEDURE BIOS(WORD function, input);	EXTERNAL;
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE REBOOT;			EXTERNAL;
+
+{
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|DR|F1|F2|//|F8|T1|T2|T3|EX|S1|S2|RC|DO|//|DN|CR|R0|R1|R2|
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ 00 01 02 .. 08 09 10 11 12 13 14 15 16 .. 31 32 33 34 35
+
+The sectors of a track are read in the following order:
+first odd sectors, then even sectors in ascending order
+1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,
+2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32
+T0[S9 - S32], T1, T2, T3, T4, T5[S1 - S24]
+   28       + 32+ 32+ 32+ 32+ 28 = 184 sectors = 23552 byte (5C00)
+loads sectors to 0 .. 5bff and jumps to 0 when done
+
+}
+
+CONST	{ CP/M 2 and CP/M 3 BIOS	}
+	SELDSK			= 8;
+	SETTRK			= 9;
+	SETSEC			= 10;
+	SETDMA			= 11;
+	WRITE			= 13;
+	{ CP/M 3 BIOS only		}
+	SETBNK			= 27;
+	commandLineAddress	= 80h;
+	defaultFCBAddress	= 05ch;
+	defaultFCBCRAddress	= defaultFCBAddress + 32;
+	printCharCMD		= 2h;
+	printStringCMD		= 9h;
+	selectDiskCMD		= 0eh;
+	openFileCMD		= 0fh;
+	readSequentialCMD	= 14h;
+	setDMAAdressCMD		= 1ah;
+	versionNumberCMD	= 0ch;
+	notFoundError		= 0ffh;
+	cr			= 13;
+	lf			= 10;
+	crlf			= cr + 256 * lf;
+	eof			= 1ah;
+	recordSize		= 128;
+	fillByte		= 0e5h;
+	fillWord		= 257 * fillByte;
+	false			= 0;
+	true			= 1;
+
+BYTE 	commandLine AT commandLineAddress;
+	defaultFCBCR AT defaultFCBCRAddress;
+	usage		= ('BOOTGEN <file> <drive>', crlf,
+		'  copies <file> to the boot section of <drive>',
+		crlf, '$':[1]);
+	signon		= (crlf, 'BOOTGEN V-1.08 (15-Oct-06)', crlf, '$':[1]);
+	middle2		= (': $');
+	fileNotFound	= ('File not found.', crlf, '$':[1]);
+	writeError	= ('Write error on track $');
+	middleError	= (' and sector $');
+	finalError	= (' occured.', crlf, '$':[1]);
+	signoff		= (' sectors written.', crlf, '$':[1]);
+	versionString	= 'CP/M ';
+	versionChar	= ('2 detected.', crlf, '$':[1]);
+	drive, track, sector, totalSectors, error, i, cpm3;
+BYTE[recordSize]
+	buffer = (0c3h:[1], 0:[1], 1:[1], crlf, crlf,
+	'Copyright 2006 by Peter Schorn, peter.schorn@acm.org',
+	crlf, crlf, eof:[1]);
+WORD	bufferp, eofMemory;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCMD, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCMD, char)
+	END printChar;
+
+PROCEDURE printUnsignedInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printUnsignedInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printUnsignedInt;
+
+{						{ debug }
+PROCEDURE printHex(WORD Byte);
+	STATIC BYTE hexDigits = '0123456789ABCDEF';
+	BEGIN
+	printChar(hexDigits[Byte:[1] DIV 16]:[1]);
+	printChar(hexDigits[Byte:[1] AND 15]:[1])
+	END printHex;
+
+PROCEDURE showBuffer(WORD bufadr);
+	STATIC BYTE n;
+	BEGIN
+	n := 0;
+	WHILE n << 128 DO
+		printHex(bufadr^[n]:[1]);
+		printChar(' ');
+		n := n + 1
+	ENDWHILE;
+	printChar(cr);
+	printChar(lf)
+	END showBuffer;
+}						{ debug }
+
+PROCEDURE writeSector(WORD bufadr);
+	BEGIN
+	printChar(drive + 'A');
+	printString(@middle2);
+	printChar('T');
+	printUnsignedInt(track);
+	printChar(' ');
+	printChar('S');
+	printUnsignedInt(sector);
+	printChar(cr);
+{	printChar(lf); }			{ debug }
+	error := 0;
+{	showBuffer(bufadr); }			{ debug }
+	IF	cpm3 <> false
+	THEN	BIOS(SETBNK, 1)
+	ENDIF;
+	BIOS(SETDMA, bufadr);
+	BIOS(SELDSK, drive);
+	BIOS(SETTRK, track);
+	BIOS(SETSEC, sector);
+	IF	BIOS(WRITE, 0) <> 0
+	THEN	printString(@writeError);
+		printUnsignedInt(track);
+		printString(@middleError);
+		printUnsignedInt(sector);
+		printString(@finalError);
+		error := 1
+	ENDIF
+	END writeSector;
+
+BEGIN
+printString(@signon);
+
+IF	(commandLine[0]:[1] = 0) OR
+	(commandLine[commandLine[0]:[1]]:[1] <> ':') OR
+	(commandLine[commandLine[0]:[1] - 2]:[1] <> ' ')
+THEN	printString(@usage);
+	EXIT
+ENDIF;
+drive := commandLine[commandLine[0]:[1] - 1]:[1] - 'A';
+{ printChar(drive + 'A'), printChar(cr), printChar(lf), EXIT; } { debug }
+
+cpm3 := BDOS(versionNumberCMD, 0) >>= 30h;
+versionChar:[1] := '2' + cpm3;
+printString(@versionString);
+
+IF	BDOS(openFileCMD, defaultFCBAddress) = notFoundError
+THEN	printString(@fileNotFound);
+	EXIT
+ENDIF;
+defaultFCBCR:[1] := 0;
+
+eofMemory	:= LAST;
+bufferp		:= eofMemory;
+totalSectors	:= 0;
+
+LOOP	BDOS(setDMAAdressCMD, bufferp);
+	IF	BDOS(readSequentialCMD, defaultFCBAddress) <> 0
+	THEN	EXIT
+	ENDIF;
+	bufferp := bufferp + recordSize;
+	totalSectors := totalSectors + 1
+ENDLOOP;
+
+i := 0;
+WHILE i < recordSize DO
+	buffer[i]:[1] := fillByte;
+	i := i + 1
+ENDWHILE;
+
+buffer[0]:[1]	:= 0c3h; { jp 100h }
+buffer[1]:[2]	:= 100h;
+track		:= 0;
+sector		:= 9;
+writeSector(@buffer);
+IF	error <> 0
+THEN	EXIT
+ENDIF;
+sector		:= 11;
+buffer[0]:[2]	:= fillWord;
+buffer[2]:[2]	:= fillWord;
+writeSector(@buffer);
+IF	error <> 0
+THEN	EXIT
+ENDIF;
+
+i := totalSectors;
+bufferp := eofMemory;
+WHILE i >> 0 DO
+	i := i - 1;
+	IF	sector = 31
+	THEN	sector := 2
+	ELSIF	sector = 32
+	THEN	sector := 1;
+		track := track + 1
+	ELSE	sector := sector + 2
+	ENDIF;
+	writeSector(bufferp);
+	IF	error <> 0
+	THEN	EXIT
+	ENDIF;
+	bufferp := bufferp + recordSize
+ENDWHILE;
+
+printUnsignedInt(totalSectors + 2);
+printString(@signoff);
+REBOOT { force reboot }
+
+END BootGen.
+

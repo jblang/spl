@@ -1,0 +1,17 @@
+	.Z80
+
+	ENTRY	OUTPOR
+
+; PROCEDURE OUTPOR(WORD port, data);EXTERNAL;
+; port	= port number
+; data	= lower byte of data will be sent to port
+
+OUTPOR:	POP	HL	; return address
+	POP	DE	; data
+	EX	(SP),HL	; put return address back on stack, <HL> := port number
+	LD	C,L	; <C> = port number
+	OUT	(C),E	; write value to port
+	RET
+
+	END
+

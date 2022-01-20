@@ -1,0 +1,22 @@
+	.Z80
+
+CPM	EQU	0005H	
+	ENTRY	BDOS
+	
+;	PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+;	result of call is returned in <HL>
+BDOS:	POP	HL		; <HL> := return address
+	POP	DE		; <DE> := input
+	EX	(SP),HL		; <HL> := function, return address on stack
+	LD	C,L		; load function code
+	PUSH	IX		; sometimes the BDOS modifies <IX>
+				; SPL assumes no change
+	CALL	CPM		; execute CP/M BDOS function
+	POP	IX		; restore <IX>
+	LD	L,A		; <HL> := <AB>. Note that this is guaranteed by
+	LD	H,B		; CP/M but not by other BDOS implementations.
+	XOR	A		; SPL expects <A> to be cleared
+	RET
+
+	END
+

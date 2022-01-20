@@ -1,0 +1,71 @@
+	.Z80
+	ENTRY		.WDV, .MOD
+
+	TITLE	"SMTH12 - Syslib 4.3a"
+	NAME	('DIVHD')
+;=================================================================
+;   The Libraries, Version 4, (C) 1989 by Alpha Systems Corp.
+;-----------------------------------------------------------------
+; Author  : Joe Wright
+; Date    : 9 Dec 89
+; Version : 1.3
+; Module  : SMTH12
+; Abstract:  This module contains the routine DIVHD which divides
+;	the 16-bit unsigned value in the HL register by the 16-bit
+;	value in DE with the results being returned in HL.
+; Revision:
+;  1.3 - 26 Oct 90 - Added new MODHD and SDIV entries and sped up
+;	the division.					JWW
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+;===============================================================
+; NAME - .WDV
+; Entry: HL the dividend, DE the divisor (16-bit unsigned numbers)
+; Exit : HL := HL div DE  (the Quotient)
+; Uses : HL
+; Special Requirements: None
+; Note ** Division by Zero returns FFFFh **
+;===============================================================
+
+.WDV:	CALL	.MOD		; DE := HL div DE
+	EX	DE,HL		; Quotient to HL
+	RET
+
+;===============================================================
+; NAME - .MOD	General Purpose Sixteen Bit Division.
+; Entry: HL the dividend, DE the divisor (16-bit unsigned numbers)
+; Exit:  DE := HL div DE	Division by 0 yields 0FFFFh (-1)
+; 	 HL := HL mod DE	Remainder of the division
+; Uses:  HL and DE
+; Special Requirements: None
+;===============================================================
+
+.MOD:	LD	B,D
+	LD	C,E		; Divisor to BC
+	EX	DE,HL		; Dividend to DE
+
+	XOR	A		; Clear Carry and <A>
+	LD	L,A		; Clear HL
+	LD	H,A
+	LD	A,16+1		; Seventeen times through the loop
+
+; Main loop
+
+DIV:	ADC	HL,HL		; Shift ACC left plus Carry
+	SBC	HL,BC		; Subtract the divisor
+	JR	NC,DIV0		; It worked..
+
+	ADD	HL,BC		; Restore HL, Carry again
+DIV0:	CCF			; Complement Carry flag
+	EX	DE,HL		; Get the dividend
+	ADC	HL,HL		; Shift Cy to L0 and H7 to Cy
+	EX	DE,HL		; Put it back
+	DEC	A		; Finished?
+	JR	NZ,DIV		; ..loop if not and do again
+
+; End of loop.	Quit.
+
+	RET			; Return to caller
+
+	END
+

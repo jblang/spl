@@ -1,0 +1,16 @@
+	.Z80
+
+	ENTRY	.IOR
+
+; <HL> := <HL> OR <DE> (16-bit)
+.IOR:	LD	A,E
+	OR	L
+	LD	L,A	; <L> := <L> OR <E>
+	LD	A,D
+	OR	H
+	LD	H,A	; <H> := <H> OR <D>
+	XOR	A	; SPL expects <A> to be cleared
+	RET
+
+	END
+

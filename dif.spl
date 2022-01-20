@@ -1,0 +1,371 @@
+PROGRAM Differences;
+
+{	Version history
+	- 22-Mar-2015, P. Schorn, compatibility with new SPL compiler
+	- 06-Aug-2004, P. Schorn, introduced some optimizations
+	- 01-Jul-2004, P. Schorn, replaced standard procedure calls
+	- 25-Oct-2002, P. Schorn, replaced direct console IO with BIOS call
+	- 20-Oct-2002, P. Schorn, added ignore 0 feature
+				  fixed number of differences bug
+	- 31-Mar-2002, P. Schorn, added automatic compare until EOF
+	- 30-Mar-2002, P. Schorn, cleaned up data types
+	- 24-Mar-2002, P. Schorn, added force Z80 CPU
+	- 26-Jan-2002, P. Schorn, Changed name to "Differences"
+}
+
+PROCEDURE BIOS(WORD function, input);	EXTERNAL;
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+
+CONST	{ CP/M 2 and CP/M 3 BIOS }
+	CONSTAT			= 1;
+	CONIN			= 2;
+	default1FCBAddress	= 05ch;
+	default2FCBAddress	= 06cH;
+	crPos			= 32;
+	commandLineAddress	= 80h;
+	FCBLength		= 36; { allow random access }
+	consoleInputCMD		= 1h;
+	printCharCMD		= 2h;
+	printStringCMD		= 9h;
+	openFileCMD		= 0fh;
+	readSequentialCMD	= 14h;
+	setDMAAdressCMD		= 1ah;
+	hexMode			= 0;
+	decimalMode		= 1;
+	cr			= 13;
+	lf			= 10;
+	esc			= 27;
+	ctrlc			= 'C' - 64;
+	crlf			= cr + 256 * lf;
+	eof			= 1ah;
+	recordSize		= 128;
+	noError			= 0;
+	notFoundError		= 0ffh;
+	false			= 0;
+	true			= 1;
+
+{
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|DR|F1|F2|//|F8|T1|T2|T3|EX|S1|S2|RC|DO|//|DN|CR|R0|R1|R2|
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ 00 01 02 .. 08 09 10 11 12 13 14 15 16 .. 31 32 33 34 35
+}
+
+BYTE 	commandLine	AT commandLineAddress;
+	usage		= ('DIF <file1> <file2> [C|0]', crlf,
+			   '  determines the differences between <file1> ',
+			   'and <file2>', crlf,
+			   '  [ignoring case|ignoring 0s]', crlf, '$':[1]);
+	signon		= (crlf, 'DIF V-1.08 (06-Aug-2004)', crlf, '$':[1],
+				eof:[1]);
+	ignoringCase	= ('*** Ignoring case. ***',	crlf, '$':[1]);
+	ignoringZero	= ('*** Ignoring 0s. ***',	crlf, '$':[1]);
+	fileNotFound	= ('<file');
+	fileNotFoundNumber	= 'X':[1];
+	fileNotFoundContinue	= '> does not exist.';
+	{ immediately followed by crlfString }
+	crlfString	= (crlf, '$':[1]);
+	compareString	= (' <> $');
+	usageAdvance	= (crlf, 'Valid characters are:',	  crlf,
+			   '  <CR> : advance on both files',	  crlf,
+			   '  A    : advance until End Of File',  crlf,
+			   '  1    : advance on <file1>',	  crlf,
+			   '  2    : advance on <file2>',	  crlf,
+			   '  C    : toggle ignore case',	  crlf,
+			   '  0    : toggle ignore 0',		  crlf,
+			   '  H    : switch to hex display',	  crlf,
+			   '  D    : switch to decimal display',  crlf,
+			   '  .    : stop comparison',		  crlf,
+			   lf:[1], '$':[1]);
+	different0	= (' difference$');
+	different1	= (' detected. The files are different.',
+				crlf, '$':[1]);
+	identical	= ('The files are identical.', crlf, '$':[1]);
+	prefix		= ('<file');
+	prefixOneNumber	= 'X':[1];
+	prefixContinue1	= '> is prefix of <file';
+	prefixTwoNumber	= 'Y':[1];
+	prefixContinue2	= ('>':[1], crlf, '$':[1]);
+	hexModeString	= 'H $';
+	decimalModeString = 'D $';
+	response, pos1, pos2, eof1, eof2, byte1, byte2;
+	isDifferent, mode, auto, ignoreCase, ignoreZero;
+WORD	adr1, adr2, buf1p, buf2p, numberOfDifferences;
+BYTE[FCBLength]	default1FCB AT default1FCBAddress;
+BYTE[FCBLength]	default2FCB AT default2FCBAddress;
+BYTE[FCBLength]	file1FCB = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0);
+BYTE[FCBLength]	file2FCB = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0);
+
+PROCEDURE advance1;
+	BEGIN
+	pos1 := pos1 + 1;
+	adr1 := adr1 + 1
+	END advance1;
+
+PROCEDURE advance2;
+	BEGIN
+	pos2 := pos2 + 1;
+	adr2 := adr2 + 1
+	END advance2;
+
+PROCEDURE advanceBoth;
+	BEGIN
+	advance1;
+	advance2
+	END advanceBoth;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOS(printStringCMD, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCMD, char:[1])
+	END printChar;
+
+PROCEDURE printIntWidth(WORD int, width);
+	STATIC BYTE i;
+	BEGIN
+	IF	int << 10
+	THEN	i := 0;
+		WHILE i < width DO
+			i := i + 1;
+			printChar(' ')
+		ENDWHILE;
+		printChar(int + '0')
+	ELSE	printIntWidth(int DIV 10, width - 1);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printIntWidth;
+
+PROCEDURE printHexByte(WORD theByte);
+	STATIC BYTE hexDigits = ('0123456789ABCDEF');
+	BEGIN
+	printChar(hexDigits[theByte:[1] DIV 16]:[1]);
+	printChar(hexDigits[theByte:[1] AND 15]:[1])
+	END printHexByte;
+
+PROCEDURE printHexWord(WORD hex);
+	BEGIN
+	printHexByte(hex[1]:[1]);
+	printHexByte(hex[0]:[1])
+	END printHexWord;
+
+PROCEDURE printASCII(WORD ascii);
+	BEGIN
+	printChar('/');
+	ascii:[1] := ascii:[1] AND 07fh;
+	IF	(' ' <<= ascii:[1]) AND (ascii:[1] << 127)
+	THEN	printChar(ascii:[1])
+	ELSE	printChar('.')
+	ENDIF
+	END printASCII;
+
+PROCEDURE printIntAddress(WORD address);
+	BEGIN
+	printChar('[');
+	printIntWidth(address, 5);
+	printChar(']')
+	END printIntAddress;
+
+PROCEDURE printHexAddress(WORD address);
+	BEGIN
+	printChar('[');
+	printHexWord(address);
+	printChar(']')
+	END printHexAddress;
+
+PROCEDURE printCRLFString;
+	BEGIN
+	printString(@crlfString)
+	END printCRLFString;
+
+PROCEDURE getResponse;
+	BEGIN
+	response := BIOS(CONSTAT, 0);
+	IF	response <> 0
+	THEN	response := BIOS(CONIN, 0)
+	ENDIF;
+	IF	('a' <<= response) AND (response <<= 'z')
+	THEN	response := response + ('A' - 'a')
+	ENDIF
+	END getResponse;
+
+BEGIN { Differences }
+printString(@signon);
+IF	commandLine[0]:[1] = 0
+THEN	printString(@usage);
+	EXIT
+ENDIF;
+
+file1FCB:[FCBLength] := default1FCB:[FCBLength];
+file2FCB:[FCBLength] := default2FCB:[FCBLength];
+
+IF	BDOS(openFileCMD, @file1FCB) = notFoundError
+THEN	fileNotFoundNumber := '1';
+	printString(@fileNotFound);
+	EXIT
+ENDIF;
+IF	BDOS(openFileCMD, @file2FCB) = notFoundError
+THEN	fileNotFoundNumber := '2';
+	printString(@fileNotFound);
+	EXIT
+ENDIF;
+file1FCB[crPos]:[1]	:= 0;
+file2FCB[crPos]:[1]	:= 0;
+numberOfDifferences	:= 0;
+auto			:= false;
+ignoreCase		:= false;
+ignoreZero		:= false;
+eof1			:= false;
+eof2			:= false;
+mode			:= hexMode;
+
+pos1 := commandLine[commandLine[0]:[1]]:[1];
+pos2 := commandLine[commandLine[0]:[1] - 1]:[1];
+IF	(commandLine[commandLine[0]:[1] - 2]:[1] = ' ') OR (pos2 = ' ')
+THEN	IF	(pos1 = 'C') OR (pos2 = 'C')
+	THEN	ignoreCase := true;
+		printString(@ignoringCase)
+	ENDIF;
+	IF	(pos1 = '0') OR (pos2 = '0')
+	THEN	ignoreZero := true;
+		printString(@ignoringZero)
+	ENDIF
+ENDIF;
+
+adr1	:= 100h;
+adr2	:= 100h;
+pos1	:= recordSize + 1;
+pos2	:= recordSize + 1;
+buf1p	:= LAST;
+buf2p	:= buf1p + recordSize;
+LOOP	IF	pos1 >>= recordSize
+	THEN	BDOS(setDMAAdressCMD, buf1p);
+		IF	BDOS(readSequentialCMD, @file1FCB) <> noError
+		THEN	eof1 := true
+		ENDIF;
+		pos1 := 0
+	ENDIF;
+	IF	pos2 >>= recordSize
+	THEN	BDOS(setDMAAdressCMD, buf2p);
+		IF	BDOS(readSequentialCMD, @file2FCB) <> noError
+		THEN	eof2 := true
+		ENDIF;
+		pos2 := 0
+	ENDIF;
+	IF	(eof1 <> false) OR (eof2 <> false)
+	THEN	EXIT
+	ENDIF;
+	byte1 := buf1p^[pos1]:[1];
+	byte2 := buf2p^[pos2]:[1];
+	IF	(byte1 = byte2) OR ((ignoreCase <> false) AND
+		(('a' <<= byte1) AND (byte1 <<= 'z') AND
+			(byte2 + ('a' - 'A') = byte1) OR
+		 ('a' <<= byte2) AND (byte2 <<= 'z') AND
+		 	(byte1 + ('a' - 'A') = byte2)))
+		OR ((ignoreZero <> false) AND ((byte1 = 0) OR (byte2 = 0)))
+	THEN	advanceBoth
+	ELSE	numberOfDifferences := numberOfDifferences + 1;
+		IF	ignoreCase = false
+		THEN	printChar(' ')
+		ELSE	printChar('C')
+		ENDIF;
+		IF	ignoreZero = false
+		THEN	printChar(' ')
+		ELSE	printChar('0')
+		ENDIF;
+		IF	mode = decimalMode
+		THEN	printString(@decimalModeString);
+			printIntAddress(adr1);
+			printChar('=');
+			printIntWidth(byte1, 3);
+			printASCII(byte1);
+			printString(@compareString);
+			printIntWidth(byte2, 3);
+			printASCII(byte2);
+			printChar('=');
+			printIntAddress(adr2)
+		ELSE	printString(@hexModeString);
+			printHexAddress(adr1);
+			printChar('=');
+			printHexByte(byte1);
+			printASCII(byte1);
+			printString(@compareString);
+			printHexByte(byte2);
+			printASCII(byte2);
+			printChar('=');
+			printHexAddress(adr2)
+		ENDIF;
+		IF	auto = false
+		THEN	REPEAT
+				getResponse
+			UNTIL response <> 0;
+			printCRLFString;
+			IF	(response = cr) OR (response = lf) OR
+				(response = ' ')
+			THEN	advanceBoth
+			ELSIF	response = '1'
+			THEN	advance1
+			ELSIF	response = '2'
+			THEN	advance2
+			ELSIF	(response = '.') OR (response = esc) OR
+				(response = ctrlc)
+			THEN	EXIT
+			ELSIF	response = 'H'
+			THEN	mode := hexMode;
+				{ adjust number of differences in this case }
+				numberOfDifferences := numberOfDifferences - 1
+			ELSIF	response = 'D'
+			THEN	mode := decimalMode;
+				{ adjust number of differences in this case }
+				numberOfDifferences := numberOfDifferences - 1
+			ELSIF	response = 'A'
+			THEN	auto := true;
+				advanceBoth
+			ELSIF	response = 'C'
+			THEN	ignoreCase := true - ignoreCase;
+				advanceBoth
+			ELSIF	response = '0'
+			THEN	ignoreZero := true - ignoreZero;
+				advanceBoth
+			ELSE	printString(@usageAdvance);
+				{ adjust number of differences in this case }
+				numberOfDifferences := numberOfDifferences - 1
+			ENDIF
+		ELSE	getResponse;
+			IF	response = 'A'
+			THEN	auto := false
+			ELSIF	(response = '.') OR (response = esc) OR
+				(response = ctrlc)
+			THEN	EXIT
+			ENDIF;
+			printCRLFString;
+			advanceBoth
+		ENDIF
+	ENDIF
+ENDLOOP;
+printCRLFString;
+IF	numberOfDifferences <> 0
+THEN	printIntWidth(numberOfDifferences, 0);
+	printString(@different0);
+	IF	numberOfDifferences >> 1
+	THEN	printChar('s');
+	ENDIF;
+	printString(@different1)
+ELSIF	(eof1 <> false) AND (eof2 <> false)
+THEN	printString(@identical)
+ELSE	IF	eof1 <> false
+	THEN	prefixOneNumber := '1';
+		prefixTwoNumber := '2';
+	ELSE	prefixOneNumber := '2';
+		prefixTwoNumber := '1';
+	ENDIF;
+	printString(@prefix)
+ENDIF
+END Differences.
+

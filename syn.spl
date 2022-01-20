@@ -1,0 +1,426 @@
+PROGRAM MostSyntaxErrors;
+
+EXPORT xyz, label;
+
+WORD	a;
+
+PROCEDURE err01; { Error in number }
+	BEGIN
+	a := 123B;	{ Binary	}
+	a := 12F3O;	{ Octal		}
+	a := 5693C;	{ Octal		}
+	a := 12A3D;	{ Decimal	}
+	a := 12C3	{ Decimal	}
+	END err01;
+
+PROCEDURE err02; { ENDIF or ELSIF expected }
+	BEGIN
+	IF	a = 0
+	THEN	a := 0
+	END err02;
+
+PROCEDURE err03; { Use ":=" instead of "=" }
+	BEGIN
+	a = 0
+	END err03;
+
+PROCEDURE err04; { Cannot assign boolean value }
+	BEGIN
+	a:[0] := 0
+	END err04;
+
+PROCEDURE err05; { Type mismatch }
+	BEGIN
+	a := a:[3];
+	a := a:[3] AND (a = 1);
+	a := a:[3] * (a = 1);
+	a := a:[3] OR (a = 1);
+	a := a:[3] - (a = 1);
+	END err05;
+
+PROCEDURE err06; { "^" expected }
+	BEGIN
+	(a) := 0
+	END err06;
+
+PROCEDURE err07; { Too few parameter }
+	PROCEDURE p(WORD x, a);
+		BEGIN
+		END p;
+	BEGIN
+	p(0)
+	END err07;
+
+PROCEDURE err08; { CONTINUE outside of REPEAT, WHILE or LOOP loop }
+	BEGIN
+	CONTINUE
+	END err08;
+
+PROCEDURE err09; { Parameter list expected }
+	PROCEDURE p(WORD x);
+		BEGIN
+		END p;
+	BEGIN
+	p
+	END err09;
+
+PROCEDURE err10; { Boolean expression expected }
+	BEGIN
+	IF	a:[3]
+	THEN
+	ENDIF;
+	WHILE a:[3] DO
+	ENDWHILE;
+	REPEAT
+	UNTIL a:[3]
+	END err10;
+
+PROCEDURE err11; { DO expected }
+	BEGIN
+	WHILE a = 0
+	ENDWHILE
+	END err11;
+
+PROCEDURE err12; { THEN expected }
+	BEGIN
+	IF	a = 0
+	ENDIF
+	END err12;
+
+PROCEDURE err13; { UNTIL expected }
+	BEGIN
+	REPEAT
+	END err13;
+
+PROCEDURE err15; { ":=" expected }
+	BEGIN
+	a
+	END err15;
+
+PROCEDURE err16; { Too many parameters }
+	BEGIN
+	err16(2, 3, 4)
+	END err16;
+
+PROCEDURE err17; { Can only compare numeric or boolean values }
+	BEGIN
+	IF	a:[3] <= a:[3]
+	THEN	a := 0
+	ENDIF
+	END err17;
+
+PROCEDURE err18; { ENDWHILE expected }
+	BEGIN
+	WHILE a = 0 DO
+	END err18;
+
+PROCEDURE err19; { Type of actual parameter does not match formal parameter }
+	PROCEDURE p(WORD x);
+		BEGIN
+		END p;
+	BEGIN
+	p(a:[3])
+	END err19;
+
+PROCEDURE err20; { ENDIF expected }
+	BEGIN
+	IF	a = 0
+	THEN
+	ELSE
+	END err20;
+
+PROCEDURE err21; { Size cannot be zero }
+	BEGIN
+	a := a:[0]
+	END err21;
+
+PROCEDURE err23; { ":" expected }
+	LABEL x;
+	BEGIN
+	x
+	CASE a OF
+	2	END
+	ENDCASE
+	END err23;
+
+PROCEDURE err24; { ";" or "," expected }
+	BEGIN
+	a := 0
+	a := 0
+	END err24;
+
+PROCEDURE err25; { ENDLOOP expected }
+	BEGIN
+	LOOP
+	END err25;
+
+PROCEDURE err28; { Cannot jump out of block }
+	LABEL x;
+	PROCEDURE p(WORD a);
+		BEGIN
+		GOTO x;
+		END p;
+	BEGIN
+x:
+	END err28;
+
+PROCEDURE err31; { Identifier expected }
+	BEGIN
+	GOTO 2;
+	END err31;
+
+PROCEDURE err32; { Illegal label }
+	PROCEDURE p(WORD x);
+		BEGIN
+		GOTO x;
+		END p;
+	BEGIN
+	END err32;
+
+PROCEDURE err34; { Identifier must be variable or procedure }
+	CONST x = 0;
+	BEGIN
+	x(2)
+	END err34;
+
+PROCEDURE err38; { Division by 0 }
+	CONST x = 2 / 0;
+		y = 3 DIV 0;
+	BEGIN
+	a := 2 / 0;
+	a := 7 DIV 0
+	END err38;
+
+PROCEDURE err39; { Modulo with 0 }
+	CONST x = 2 MOD 0;
+	BEGIN
+	a := 2 MOD 0
+	END err39;
+
+PROCEDURE err41; { Identifier already defined }
+	CONST x = 0;
+	x = 1;
+	BEGIN
+	END err41;
+
+PROCEDURE err44; { BYTE or WORD expected }
+	STATIC x;
+	BEGIN
+	END err44;
+
+PROCEDURE err45; { "]" expected }
+	BEGIN
+	a:[2 := 0
+	END err45;
+
+PROCEDURE err46; { "[" expected }
+	BEGIN
+	a:
+	END err46;
+
+PROCEDURE err49; { Cannot initialize local variable }
+	WORD x = 3;
+	BEGIN
+	END err49;
+
+PROCEDURE err51; { ")" " expected }
+	BEGIN
+	a := (2
+	END err51;
+
+PROCEDURE err55; { ")" or "," expected }
+	PROCEDURE p(WORD x, y);
+		BEGIN
+		END p;
+	BEGIN
+	p(2;)
+	END err55;
+
+PROCEDURE err56; { ";" expected }
+	BEGIN
+	a := 0
+	a := 0
+	END err56;
+
+PROCEDURE err58; { Block contains undefined but used label }
+	LABEL x;
+	BEGIN
+	GOTO x
+	END err58;
+
+PROCEDURE err59; { Variable expected }
+	CONST x;
+	BEGIN
+	x := 0
+	END err59;
+
+PROCEDURE err60; { Global variable expected }
+	WORD x;
+	CONST y = @x;
+	BEGIN
+	END err60;
+
+PROCEDURE err61; { Recursive constant declaration }
+	CONST x = x + 1;
+	BEGIN
+	END err61;
+
+PROCEDURE err62; { Constant expected }
+	CONST x = a;
+	BEGIN
+	END err62;
+
+PROCEDURE err63; { Constant factor cannot start with this symbol }
+	CONST x = <;
+	BEGIN
+	END err63;
+
+PROCEDURE err65; { BEGIN, LABEL, CONST, STATIC, BYTE, WORD, PROCEDURE expected }
+	WHILE
+	BEGIN
+	END err65;
+
+PROCEDURE err66; { END expected }
+	PROCEDURE x;
+		BEGIN
+		x;
+	BEGIN
+	CASE a OF
+	2:
+	ENDCASE
+	END err66;
+
+PROCEDURE err67; { Identifier is not name of this block }
+	BEGIN
+	END err67x;
+
+PROCEDURE err68; { PROGRAM or MODULE expected }
+	BEGIN
+	END err68;
+
+PROCEDURE err70; { Variable must be local or global }
+	WORD x;
+	PROCEDURE y;
+		BEGIN
+		x := 0
+		END y;
+	BEGIN
+	END err70;
+
+PROCEDURE err71; { Numerical value expected }
+	BEGIN
+	a := -a:[3];
+	a := a[a:[3]];
+	a(a:[3])
+	END err71;
+
+PROCEDURE err72; { Boolean expression expected }
+	BEGIN
+	IF	a:[3]
+	THEN
+	ENDIF
+	END err72;
+
+PROCEDURE err76; { Numeric factor expected }
+	BEGIN
+	a := (a:[3])^
+	END err76;
+
+PROCEDURE err79; { Simple boolean expression expected }
+	BEGIN
+	IF	(a = 0) = (a:[3])
+	THEN
+	ENDIF
+	END err79;
+
+PROCEDURE err81; { OF expected }
+	BEGIN
+	CASE a
+	2:	END
+	ENDCASE
+	END err81;
+
+PROCEDURE err82; { Duplicate case entry }
+	BEGIN
+	CASE a OF
+	2, 2:	END
+	ENDCASE
+	END err82;
+
+PROCEDURE err83; { ENDCASE expected }
+	BEGIN
+	CASE a OF
+	2:	END
+	END err83;
+
+PROCEDURE err86; { Parameter list does not match previous }
+	PROCEDURE p; FORWARD;
+	PROCEDURE p(WORD x);
+		BEGIN
+		END p;
+	BEGIN
+	END err86;
+
+PROCEDURE err87; { Procedure declared forward but not defined }
+	PROCEDURE p; FORWARD;
+	BEGIN
+	END err87;
+
+PROCEDURE err89; { Recursive include not allowed }
+	{$IL1.SPL}
+	BEGIN
+	END err89;
+
+PROCEDURE err90; { Include file does not exist }
+	{$IL3.SPL}
+	BEGIN
+	END err90;
+
+PROCEDURE err93; { Constant has relocatable component }
+	BEGIN
+	a:[@a] := 0
+	END err93;
+
+PROCEDURE err95; { Total size of local variables and parameters too large }
+
+	PROCEDURE p(BYTE y;BYTE[123] x); { creates error 95 }
+		BEGIN
+		END p;
+
+	PROCEDURE q(BYTE y;BYTE[122] x); { 122 is ok }
+		BEGIN
+		END q;
+
+	PROCEDURE v(BYTE y;BYTE[122] x); { creates error 95 }
+		BYTE z;
+		BEGIN
+		END v;
+
+	PROCEDURE u(BYTE y;BYTE[121] x); { 121 is ok }
+		BYTE z;
+		BEGIN
+		END u;
+
+	BEGIN
+	END err95;
+
+PROCEDURE err97; { Illegal use of @-operator in constant expression }
+	CONST x = 2 * @a;
+	BEGIN
+	END err97;
+
+LABEL label; { 94 Cannot export this kind of identifier }
+
+BEGIN
+RETURN { 14 RETURN outside of a procedure }
+END MostSyntaxErrors
+{ 84 Symbol exported but not declared }
+{ 69 "." expected }
+
+{ The following error messages are not demonstrated:
+  92: Internal compiler error	- no known case
+  91: Error writing REL file	- needs an almost full file system
+  88: End of file expected	- either 69 or 88 can occur
+  54: Program too complex	- halts compiler
+}
+

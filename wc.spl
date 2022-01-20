@@ -1,0 +1,572 @@
+PROGRAM WordCount;
+
+{	Version history
+	- 22-Mar-2015, P. Schorn, compatibility with new SPL compiler
+	- 06-Aug-2004, P. Schorn, performed some optimizations
+}
+
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE STPSUB;			EXTERNAL;
+PROCEDURE HALT;				EXTERNAL;
+
+CONST	{ BDOS functions }
+	printCharCmd		= 02h;
+	printStringCmd		= 09h;
+	readConsoleStringCmd	= 0ah;
+	commandLineAddress	= 80h;
+	cr			= 13;
+	lf			= 10;
+	fileSize		= 42;
+	recordSize		= 128;
+	driveOffset		= 6;
+	openFileCmd		= 0fh;
+	readSequentialCmd	= 14h;
+	setDMAAdressCmd		= 1ah;
+	errorStatusOffset	= 2;
+	bufferStartOffset	= 4;
+	leastOKCode		= 3;
+	errorDetected		= 00ffh;
+	eof			= 1ah;
+	noError			= 0;
+	crlf			= cr + 100H * lf;
+	cnt			= 0;
+	lt			= 2;
+	rt			= 4;
+	ap			= 6;
+	ep			= 8;
+	str			= 10,
+	size			= 10;
+	nil			= 0;
+	value			= 0;
+	next			= 2;
+	chainSize		= 4;
+	blanksPerNumber		= 4,
+	false			= 0;
+	true			= 1;
+	free			= 2;
+	minPerLine		= 7;
+	rightMargin		= 79 - blanksPerNumber - 1;
+	getConsoleStatus	= 11;
+
+BYTE	commandLine		AT commandLineAddress;
+	commandLineLength	AT commandLineAddress;
+	commandLineBufferSize	AT commandLineAddress - 1;
+	title		= (crlf, 'WC        V-1.08 (06-Aug-2004)'	);
+	{ followed by crlfString					}
+	crlfString	= (crlf, '$':[1]				);
+	prompt		= (crlf, 'File name: $'				);
+	numberDifferent	= (crlf, 'Number of different words: $'		);
+	numberTotal	= (crlf, '      Number of all words: $'		);
+	heapUsed	= (crlf, '        Heap storage used: $'		);
+	numberLines	= (crlf, '          Number of lines: $'		);
+	depthTree	= (crlf, '    Height of search tree: $'		);
+	fileNotFoundText= (crlf, 'File not found$');
+	tquery		= (crlf, 'Query: (A..Z,0..9,*,?,! and . to exit) $');
+BYTE[80]
+	theWord;
+BYTE[128]
+	buf = ('Usage: WC <filename>. Counts words in file <filename> ',
+	'(C) Copyright 2004 by Peter Schorn peter.schorn@acm.org ');
+WORD	i, j, k, startheap, heap, globalRoot, length, result, totalWords, charIndex = 1;
+	totalDifferentWords, depth, currentDepth, maxLength, printPosition, ch = ' ';
+	linecount, counter, len, isLetter, isDigit, printflag, BDOSResult;
+WORD[20]
+	spointer;
+BYTE[15]
+	filename;
+BYTE[44]
+	fcb;
+BYTE[size]
+	zero = (0, 0, 0, 0, 0);
+
+PROCEDURE BDOSSaveResult(WORD function, input);
+	BEGIN
+	BDOSResult := BDOS(function:[1], input)
+	END BDOSSaveResult;
+
+PROCEDURE printString(WORD stringp);
+	BEGIN
+	BDOSSaveResult(printStringCmd, stringp)
+	END printString;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOSSaveResult(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE spaces(WORD width);
+	BEGIN
+	WHILE width > 0 DO
+		width := width - 1;
+		printChar(' ')
+	ENDWHILE
+	END spaces;
+
+PROCEDURE printIntWidth(WORD int, width);
+	BEGIN
+	IF	int <<= 9
+	THEN	spaces(width - 1);
+		printChar(int + '0')
+	ELSE	printIntWidth(int DIV 10, width - 1);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printIntWidth;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	printIntWidth(int, 0)
+	END printInt;
+
+PROCEDURE printLn;
+	BEGIN
+	printString(@crlfString)
+	END printLn;
+
+PROCEDURE inputch;
+	BEGIN
+	IF	commandLineLength = 0
+	THEN	commandLineBufferSize := 128;
+		BDOSSaveResult(readConsoleStringCmd, commandLineAddress - 1);
+		charIndex := 1
+	ENDIF;
+	IF	charIndex <<= commandLineLength
+	THEN	ch := commandLine[charIndex]:[1];
+		charIndex := charIndex + 1
+	ELSE	ch := 0
+	ENDIF;
+	RETURN ch
+	END inputch;
+
+PROCEDURE openRead(WORD fileNameP, bufferStart, fileP);
+{	layout of extended file control block is
+	WORD	charPointer
+	WORD	errorStatus
+	WORD	bufferStart
+	regular CP/M FCB
+}
+	STATIC WORD i, j, filePStatic, fileNamePStatic, ch;
+	BEGIN
+	filePStatic := fileP;
+	fileNamePStatic := fileNameP;
+	i := filePStatic;
+	j := fileSize;
+	WHILE j DO
+		j := j - 1;
+		i^:[1] := 0;
+		i := i + 1
+	ENDWHILE;
+	filePStatic^:[2] := bufferStart + recordSize;
+	(filePStatic + bufferStartOffset)^:[2] := bufferStart;
+
+	IF	(fileNamePStatic + 1)^:[1] = ':'
+	THEN	i := fileNamePStatic + 2;
+		(filePStatic + driveOffset)^:[1] := fileNamePStatic^:[1] + (1 - 'A')
+	ELSE	i := fileNamePStatic
+	ENDIF;
+
+	j := filePStatic + (driveOffset + 1);
+	WHILE j <<= filePStatic + (driveOffset + 11) DO
+		ch := i^:[1];
+		IF	ch = 0
+		THEN	j^:[1] := ' ';
+			j := j + 1
+		ELSIF	ch = '.'
+		THEN	IF	j <<= filePStatic + (driveOffset + 8)
+			THEN	j^:[1] := ' ';
+				j := j + 1
+			ELSE	i := i + 1
+			ENDIF
+		ELSE	j^:[1] := ch;
+			i := i + 1;
+			j := j + 1
+		ENDIF
+	ENDWHILE;
+
+	BDOSSaveResult(openFileCmd, filePStatic + driveOffset);
+	IF	BDOSResult >>= leastOKCode + 1
+	THEN	(filePStatic + errorStatusOffset)^:[2] := errorDetected
+	ENDIF
+	END openRead;
+
+PROCEDURE readch(WORD charP, fileP);
+	STATIC WORD filePStatic, bufferStart, bufferP;
+	BYTE i;
+	BEGIN
+	filePStatic := fileP;
+	bufferStart := (filePStatic + bufferStartOffset)^:[2];
+	bufferP := filePStatic^:[2];
+	IF	bufferP >>= bufferStart + recordSize
+	THEN	bufferP := bufferStart;
+		BDOSSaveResult(setDMAAdressCmd, bufferStart);
+		BDOSSaveResult(readSequentialCmd, filePStatic + driveOffset);
+		IF	BDOSResult:[1] = noError
+		THEN	(filePStatic + errorStatusOffset)^:[2] := 0
+		ELSE	(filePStatic + errorStatusOffset)^:[2] := errorDetected;
+			i := recordSize;
+			WHILE i DO
+				bufferStart^:[1] := eof;
+				bufferStart := bufferStart + 1;
+				i := i - 1
+			ENDWHILE
+		ENDIF
+	ENDIF;
+	charP^:[1] := bufferP^:[1];
+	filePStatic^:[2] := bufferP + 1
+	END readch;
+
+PROCEDURE printStringFormatted(WORD strp, len);
+	STATIC BYTE count;
+	BEGIN
+	count := 0;
+	WHILE strp^:[1] DO
+		printChar(strp^:[1]);
+		strp := strp + 1;
+		count := count + 1
+	ENDWHILE;
+	spaces(len - count)
+	END printStringFormatted;
+
+PROCEDURE cap;
+	BEGIN
+	ch := ch AND 7FH;
+	IF	(ch >>= 'a') AND (ch <<= 'z')
+	THEN	ch := ch + ('A' - 'a')
+	ENDIF
+	END cap;
+
+PROCEDURE getch;
+	BEGIN
+	IF	ch = lf
+	THEN	linecount := linecount + 1
+	ENDIF;
+	readch(@ch, @fcb);
+	cap;
+	IF	(ch >>= 'A') AND (ch <<= 'Z')
+	THEN	isLetter := true
+	ELSE	isLetter := false;
+		isDigit := (ch >>= '0') AND (ch <<= '9')
+	ENDIF
+	END getch;
+
+PROCEDURE new(WORD pointerp, size);
+	STATIC BYTE heapOverflowText = (crlf, 'Input file too big - Exiting', crlf, '$':[1]);
+	BEGIN
+	pointerp^ := heap;
+	heap := heap + size;
+	IF	heap + 128 >> @size
+	THEN	printString(@heapOverflowText);
+		STPSUB;
+		HALT
+	ENDIF
+	END new;
+
+PROCEDURE insert(WORD rootP);
+	STATIC WORD root, chainP;
+
+	PROCEDURE stringCompare(WORD strp);
+		BEGIN
+		i := @theWord;
+		WHILE (i^:[1] = strp^:[1]) AND (i^:[1] <> 0) DO
+			i := i + 1;
+			strp := strp + 1
+		ENDWHILE;
+		result := i^:[1] - strp^:[1]
+		END stringCompare;
+
+	BEGIN { insert }
+	totalWords := totalWords + 1;
+	currentDepth := 0;
+	LOOP
+		currentDepth := currentDepth + 1;
+		IF	rootP^ = nil
+		THEN	length := length + 1;
+			new(rootP, size + length);
+			root := rootP^;
+			root^:[size] := zero;
+			new(@chainP, chainSize);
+			chainP^[value] := linecount;
+			chainP^[next] := nil;
+			root^[ap] := chainP;
+			root^[ep] := chainP;
+			i := 0;
+			root := root + str;
+			REPEAT
+				root^:[1] := theWord[i]:[1];
+				i := i + 1;
+				root := root + 1
+			UNTIL i = length;
+			totalDifferentWords := totalDifferentWords + 1;
+			EXIT
+		ENDIF;
+		stringCompare(@rootP^^[str]);
+		IF	result < 0
+		THEN	rootP := @rootP^^[lt]
+		ELSIF	result > 0
+		THEN	rootP := @rootP^^[rt]
+		ELSE	root := rootP^;
+			root^[cnt] := root^[cnt] + 1;
+			IF	root^[ep]^[value] <> linecount
+			THEN	new(@chainP, chainSize);
+				chainP^[next] := nil;
+				chainP^[value] := linecount;
+				root^[ep]^[next] := chainP;
+				root^[ep] := chainP
+			ENDIF;
+			EXIT
+		ENDIF
+	ENDLOOP;
+	IF	currentDepth >> depth
+	THEN	depth := currentDepth
+	ENDIF
+	END insert;
+
+PROCEDURE inorder(WORD root);
+	STATIC WORD count;
+
+	PROCEDURE checkbreak;
+		BEGIN
+		IF	BDOS(getConsoleStatus, 0)
+		THEN	printflag := false
+		ENDIF
+		END checkbreak;
+
+	PROCEDURE isokay(WORD mask, theWord);
+		STATIC WORD start, l;
+
+		PROCEDURE skip;
+			BEGIN
+			LOOP
+				WHILE (i^:[1] = j^:[1]) AND (i^:[1] <> 0) DO
+					i := i + 1;
+					j := j + 1
+				ENDWHILE;
+				IF	j^:[1]
+				THEN	IF	i^:[1] = '?'
+					THEN	i := i + 1;
+						j := j + 1
+					ELSIF	(i^:[1] = '!') AND
+						((j^:[1] <> i^[1]:[1]) OR (i^[1]:[1] = 0))
+					THEN	i := i + 2;
+						j := j + 1
+					ELSE	EXIT
+					ENDIF
+				ELSE	EXIT
+				ENDIF
+			ENDLOOP
+			END skip;
+
+		BEGIN { isokay }
+		result := false;
+		i := mask;
+		j := theWord;
+		skip;
+		IF	i^:[1]
+		THEN	EXIT
+		ENDIF;
+		IF	counter = 1
+		THEN	IF	j^:[1] = 0
+			THEN	result := true
+			ENDIF;
+			EXIT
+		ENDIF;
+		theWord := j;
+		WHILE j^:[1] DO
+			j := j + 1
+		ENDWHILE;
+		j := j - len;
+		IF	j << theWord
+		THEN	EXIT
+		ENDIF;
+		k := j;
+		i := spointer[2 * (counter - 1)];
+		skip;
+		IF	i^:[1]
+		THEN	EXIT
+		ENDIF;
+		IF	counter = 2
+		THEN	result := true;
+			EXIT
+		ENDIF;
+		ch := k^:[1];
+		k^:[1] := 0;
+		l := 0;
+		REPEAT
+			result := false;
+			start := theWord;
+			l := l + 1;
+			LOOP
+				i := spointer[2 * l];
+				j := start;
+				skip;
+				IF	i^:[1] = 0
+				THEN	result := true;
+					EXIT
+				ENDIF;
+				IF	start^:[1] = 0
+				THEN	EXIT
+				ENDIF;
+				start := start + 1;
+				IF	start^:[1] = 0
+				THEN	EXIT
+				ENDIF
+			ENDLOOP;
+			theWord := j
+		UNTIL (result = false) OR (l = counter - 2);
+		k^:[1] := ch
+		END isokay;
+
+	BEGIN { inorder }
+	IF	root <> nil
+	THEN	inorder(root^[lt]);
+		isokay(@theWord, @root^[str]);
+		IF	result <> false
+		THEN	IF	printflag <> false
+			THEN	count := root^[cnt] + 1;
+				printIntWidth(count, blanksPerNumber);
+				printChar(' ');
+				totalDifferentWords := totalDifferentWords + 1;
+				totalWords := totalWords + count;
+				printStringFormatted(@root^[str], maxLength + free);
+				printPosition := (blanksPerNumber + 1 + free) + maxLength;
+				i := printPosition;
+				j := 0;
+				count := root^[ap];
+				LOOP
+					printIntWidth(count^[value], blanksPerNumber);
+					j := j + 1;
+					count := count^[next];
+					IF	count = nil
+					THEN	EXIT
+					ENDIF;
+					printChar(',');
+					i := i + blanksPerNumber + 1;
+					IF	(i >> rightMargin) AND (j >> minPerLine)
+					THEN	checkbreak;
+						printLn;
+						spaces(printPosition);
+						i := printPosition;
+						j := 0
+					ENDIF
+				ENDLOOP;
+				checkbreak;
+				printLn
+			ELSE	i := 0;
+				j := @root^[str];
+				REPEAT
+					i := i + 1;
+					j := j + 1
+				UNTIL j^:[1] = 0;
+				IF	i >> maxLength
+				THEN	maxLength := i
+				ENDIF
+			ENDIF
+		ENDIF;
+		inorder(root^[rt])
+	ENDIF
+	END inorder;
+
+PROCEDURE getString(WORD chp);
+	BEGIN
+	REPEAT
+		inputch;
+		WHILE ch = ' ' DO
+			inputch
+		ENDWHILE;
+		cap;
+		chp^:[1] := ch;
+		chp := chp + 1
+	UNTIL ch = 0
+	END getString;
+
+PROCEDURE printResult;
+	BEGIN
+	printString(@numberDifferent);
+	printInt(totalDifferentWords);
+	printString(@numberTotal);
+	printInt(totalWords);
+	printString(@heapUsed);
+	printInt(heap - startheap);
+	printString(@depthTree);
+	printInt(depth);
+	printString(@numberLines);
+	printInt(linecount - 1);
+	printLn
+	END printResult;
+
+BEGIN { WordCount }
+printString(@title);
+IF	commandLineLength = 0
+THEN	printString(@prompt)
+ENDIF;
+getString(@filename);
+openRead(@filename, @buf, @fcb);
+IF	fcb[errorStatusOffset] = errorDetected
+THEN	printString(@fileNotFoundText);
+	STPSUB;
+	EXIT
+ENDIF;
+heap := LAST;
+startheap := heap;
+linecount := 1;
+depth := 0;
+totalWords := 0;
+totalDifferentWords := 0;
+globalRoot := nil;
+getch;
+LOOP
+	WHILE (isLetter = false) AND (ch <> eof) DO
+		getch
+	ENDWHILE;
+	IF	ch = eof
+	THEN	EXIT
+	ENDIF;
+	length := 0;
+	REPEAT
+		theWord[length]:[1] := ch;
+		length := length + 1;
+		getch
+	UNTIL (isLetter = false) AND (isDigit = false);
+	theWord[length]:[1] := 0;
+	insert(@globalRoot)
+ENDLOOP;
+printLn;
+printResult;
+LOOP
+	printString(@tquery);
+	commandLineLength := 0;
+	getString(@theWord);
+	IF	theWord:[1] = '.'
+	THEN	EXIT
+	ENDIF;
+	j := @spointer;
+	i := @theWord;
+	counter := 0;
+	LOOP
+		j^ := i;
+		j := j + 2;
+		counter := counter + 1;
+		len := 0;
+		WHILE (i^:[1] <> 0) AND (i^:[1] <> '*') DO
+			i := i + 1;
+			len := len + 1
+		ENDWHILE;
+		IF	i^:[1] = 0
+		THEN	EXIT
+		ENDIF;
+		i^:[1] := 0;
+		i := i + 1
+	ENDLOOP;
+	maxLength := 0;
+	printflag := false;
+	inorder(globalRoot);
+	totalDifferentWords := 0;
+	totalWords := 0;
+	printflag := true;
+	printLn;
+	inorder(globalRoot);
+	printResult
+ENDLOOP;
+printLn
+END WordCount.
+

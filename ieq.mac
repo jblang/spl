@@ -1,0 +1,16 @@
+	.Z80
+
+	ENTRY	.IEQ
+
+; set carry flag if <HL> not equal <DE>
+; <HL> and <DE> remain unchanged
+.IEQ:	XOR	A		; clear carry flag
+	PUSH	HL		; save <HL>
+	SBC	HL,DE		; compare
+	POP	HL		; restore <HL>
+	RET	Z		; return if equal, carry is not set
+	SCF			; <HL> <> <DE>, set carry flag
+	RET
+
+	END
+

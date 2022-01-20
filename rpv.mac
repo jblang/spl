@@ -1,0 +1,74 @@
+	.Z80
+
+	ENTRY	.EP0, .EPV, .EPX, .RP0, .RPV, .R20, .R40, .RX0, .RMV2
+
+;	enter a procedure which has local parameters but no local variables
+.EP0:	LD	E,A
+	LD	D,A		; <DE>=0=-(number of bytes of all local vars.)
+	JR	.EPX
+
+;	enter a procedure which has at most 255 bytes of local variables
+;	and possibly local parameters
+;	<E> = lower byte of -(number of bytes of all local variables)
+.EPV:	LD	D,0FFH		; <DE> = -(number of bytes of all local vars.)
+
+;	enter a procedure which has more than 255 bytes of local variables
+;	(cannot have local parameters in this case)
+;	<DE> = -(number of bytes of all local variables)
+.EPX:	POP	HL		; save return address
+	PUSH	IX		; save old frame pointer
+	PUSH	DE		; prepare for <IX> := <DE>
+	POP	IX		; <IX>=-(number of bytes of all local vars.)
+	ADD	IX,SP		; compute new stack- and frame pointer
+	LD	SP,IX		; also update stack pointer
+	JP	(HL)		; proceed
+
+;	return from a procedure which has more than 255 bytes of local params.
+;	but no local variables
+;	<DE> = sizeLocalParameters	(number of bytes of all local params.)
+;	<HL> is unchanged as it may contain a function result
+.RX0:	EX	DE,HL		; save <HL> into <DE>, <HL>=sizeLocalParameters
+	JR	.RMV2
+
+;	return from a procedure which has 2 bytes of local parameters
+;	but no local variables
+;	<HL> is unchanged as it may contain a function result
+.R20:	LD	E,2		; standard case <E> = 2
+
+;	return from a procedure which has at most 255 bytes of local parameters
+;	but no local variables
+;	<E> = sizeLocalParameters	(number of bytes of all local params.)
+;	<HL> is unchanged as it may contain a function result
+.RP0:	EX	DE,HL		; save <HL> into <DE>, <L>=sizeLocalParameters
+	JR	RMV		; proceed
+
+;	return from a procedure which has 4 bytes of local parameters
+;	but no local variables
+;	<HL> is unchanged as it may contain a function result
+.R40:	LD	E,4		; standard case <E> = 4
+	EX	DE,HL		; save <HL> into <DE>, <L>=sizeLocalParameters
+	JR	RMV
+
+;	return from a procedure which has local parameters and local variables
+;	<D> = sizeLocalParameters	(number of bytes of all local params.)
+;	<E> = sizeLocalVariables	(number of bytes of all local vars.)
+;	<HL> is unchanged as it may contain a function result
+.RPV:	EX	DE,HL		; save <HL> into <DE>,	<L>=sizeLocalVariables
+				;			<H>=sizeLocalParameters
+	LD	B,H		; <B> = sizeLocalParameters
+	LD	H,A		; <HL> = sizeLocalVariables
+	ADD	HL,SP		; compute new <SP>
+	LD	SP,HL		; and load it
+	LD	L,B		; <L> = sizeLocalParameters
+
+RMV:	LD	H,A		; <HL> = sizeLocalParameters
+.RMV2:	POP	IX		; restore frame pointer
+	POP	BC		; return address
+	ADD	HL,SP		; compute new <SP>
+	LD	SP,HL		; and load it
+	EX	DE,HL		; restore <HL>
+	PUSH	BC		; put return address back on stack
+	RET
+
+	END
+

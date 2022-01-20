@@ -1,0 +1,14 @@
+	.Z80
+
+	ENTRY	.ULT, .ULX
+	EXTRN	.UGE
+
+.ULX:	EX	DE,HL
+; comparison of <HL> and <DE> (16-bit unsigned numbers)
+; carry is set iff <DE> < <HL>
+.ULT:	CALL	.UGE
+	CCF
+	RET
+
+	END
+

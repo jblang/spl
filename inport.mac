@@ -1,0 +1,19 @@
+	.Z80
+
+	ENTRY	INPORT
+
+; PROCEDURE INPORT(WORD port);EXTERNAL;
+; port = port number
+; <HL> contains result
+
+INPORT:	POP	HL	; return address
+	EX	(SP),HL	; put return address back on stack, <HL> := port number
+	LD	C,L	; <C> = port number
+	IN	A,(C)	; read value from port
+	LD	L,A	; result into lower byte
+	XOR	A	; clear <A>
+	LD	H,A	; <HL> is now result
+	RET
+
+	END
+

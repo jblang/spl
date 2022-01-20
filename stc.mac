@@ -1,0 +1,25 @@
+	.Z80
+
+	ENTRY	.STC
+
+;	<BC> is number of bytes, <BC> > 2
+;	<DE> is destination address
+;	<HL> is value to be stored <BC> / 2 times starting at address <DE>
+;	if <BC> is odd, then last byte will get value of <L>
+.STC:	EX	DE,HL
+LOOP:	LD	(HL),E
+	INC	HL
+	DEC	BC
+	LD	A,C
+	OR	B
+	RET	Z		; Invariant: <A> is zero
+	LD	(HL),D
+	INC	HL
+	DEC	BC
+	LD	A,C
+	OR	B
+	JR	NZ,LOOP
+	RET			; Invariant: <A> is zero
+
+	END
+

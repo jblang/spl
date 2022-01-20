@@ -1,0 +1,5 @@
+era splerror.ok
+ren splerror.ok=splerror.dat
+r err.txt
+cerr err.txt
+

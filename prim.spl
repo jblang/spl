@@ -1,0 +1,80 @@
+PROGRAM Prim;
+
+{ Compute the primes less than 1000 using a sieve }
+
+PROCEDURE LAST;				EXTERNAL;
+PROCEDURE BDOS(WORD function, input);	EXTERNAL;
+
+CONST	{ BDOS functions }
+	printCharCmd	= 02h;
+	cr		= 13;
+	lf		= 10;
+	n		= 167;
+	nl		= 35;
+	false		= 0;
+	true		= 1;
+
+WORD	i, k, x, inc, lim, squ, p, v, isPrime;
+
+PROCEDURE printChar(WORD char);
+	BEGIN
+	BDOS(printCharCmd, char:[1])
+	END printChar;
+
+PROCEDURE printSpace;
+	BEGIN
+	printChar(' ')
+	END printSpace;
+
+PROCEDURE printInt(WORD int);
+	BEGIN
+	IF	int << 10
+	THEN	printChar(int + '0')
+	ELSE	printInt(int DIV 10);
+		printChar(int MOD 10 + '0')
+	ENDIF
+	END printInt;
+
+BEGIN { Prim }
+p := LAST;
+v := p + (2 * (n + 1));
+printInt(2);
+printSpace;
+printInt(3);
+printSpace;
+x := 1;
+lim := 2;
+i := 6;
+inc := 4;
+squ := 9;
+WHILE i <<= 2 * n DO
+	REPEAT
+		x := x + inc;
+		inc := 6 - inc;
+		IF	squ <<= x
+		THEN	lim := lim + 2;
+			v^[lim] := squ;
+			k := p^[lim + 2];
+			squ := k * k
+		ENDIF;
+		k := 4;
+		isPrime := true;
+		WHILE (isPrime <> false) AND (k << lim) DO
+			k := k + 2;
+			IF	v^[k] << x
+			THEN	v^[k] := v^[k] + 2 * p^[k]
+			ENDIF;
+			isPrime := x <> v^[k]
+		ENDWHILE
+	UNTIL isPrime <> false;
+	IF	i <<= 2 * nl
+	THEN	p^[i] := x
+	ENDIF;
+	printInt(x);
+	printSpace;
+	i := i + 2
+ENDWHILE;
+printChar(cr);
+printChar(lf)
+END Prim.
+

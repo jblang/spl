@@ -1,0 +1,35 @@
+	.Z80
+
+	ENTRY	.BEQ, .BNE
+
+; stack has: previous <AF> (i.e. carry flag), continue address
+
+; boolean equal (carry flag set represents false)
+; jump to continue address, carry flag is set to following table
+;	old	current	result
+;	notset	notset	notset
+;	notset	set	set
+;	set	notset	set
+;	set	set	notset
+.BEQ:	POP	HL		; get address
+	JR	NC,POPNOC	; current not set, implies result is old
+POPC:	POP	AF
+	CCF			; current set, implies result
+				; is complement of old
+	JP	(HL)
+
+; boolean not-equal (carry flag set represents false)
+; jump to continue address, carry flag is set to following table
+;	old	current	result
+;	notset	notset	set
+;	notset	set	notset
+;	set	notset	notset
+;	set	set	set
+.BNE:	POP	HL
+	JR	NC,POPC		; current not set implies result
+				; is complement of old
+POPNOC:	POP	AF		; current set implies result is old
+	JP	(HL)
+
+	END
+
